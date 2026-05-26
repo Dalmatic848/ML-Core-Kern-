@@ -216,6 +216,13 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
-nogit/ 
-venv/ 
+nogit/
+venv/
+
+# ML model weights
+*.pth
+*.pt
+*.ckpt
+*.bin
+models/
 

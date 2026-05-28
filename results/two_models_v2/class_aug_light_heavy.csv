@@ -1,0 +1,5 @@
+id,modality,class_aware,best_f1,best_epoch,ΔF1
+DS_ClassAug,ДС,True,0.2605,2,-0.0881
+DS_StdAll,ДС,False,0.3486,6,0.0
+UF_ClassAug,УФ,True,0.2371,1,-0.0712
+UF_StdAll,УФ,False,0.3083,1,0.0

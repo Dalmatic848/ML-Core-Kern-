@@ -226,3 +226,7 @@ venv/
 *.bin
 /models/
 
+
+
+/data/
+/old_results/

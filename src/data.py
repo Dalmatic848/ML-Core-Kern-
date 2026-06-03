@@ -26,6 +26,8 @@ def prepare_loaders(
     val_transform: transforms.Compose,
     batch_size: int = 64,
     generator: Optional[torch.Generator] = None,
+    num_workers: int = 4,
+    pin_memory: bool = True,
 ) -> Tuple[DataLoader, DataLoader, List[str]]:
     train_ds = datasets.ImageFolder(mod_path / "train", transform=train_transform)
     val_ds = datasets.ImageFolder(mod_path / "val", transform=val_transform)
@@ -36,17 +38,19 @@ def prepare_loaders(
         train_ds,
         batch_size=batch_size,
         sampler=sampler,
-        num_workers=0,
-        pin_memory=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
         drop_last=True,
+        persistent_workers=num_workers > 0,
         generator=generator,
     )
     val_loader = DataLoader(
         val_ds,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=0,
-        pin_memory=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=num_workers > 0,
     )
     return train_loader, val_loader, train_ds.classes
 

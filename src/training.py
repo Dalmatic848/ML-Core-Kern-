@@ -45,6 +45,8 @@ def train_one_epoch(
     epoch: int,
     total_epochs: int,
     mix_fn: Optional[Callable] = None,
+    clip_grad: float = 0.0,
+    batch_scheduler=None,
 ) -> float:
     model.train()
     running_loss = 0.0
@@ -61,7 +63,11 @@ def train_one_epoch(
             outputs = model(inputs)
             loss = criterion(outputs, labels)
         loss.backward()
+        if clip_grad > 0:
+            nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
         optimizer.step()
+        if batch_scheduler is not None:
+            batch_scheduler.step()
         running_loss += loss.item() * inputs.size(0)
         pbar.set_postfix(loss=f"{loss.item():.4f}")
     return running_loss / len(loader.dataset)

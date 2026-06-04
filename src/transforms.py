@@ -1,3 +1,5 @@
+from typing import List, Optional
+
 from torchvision import transforms
 
 
@@ -17,23 +19,30 @@ class PadToSquare:
 
 
 def get_transforms(
-    resize_strategy: str = "pad",
+    resize_strategy: str = "square",
     aug_level: str = "std",
     is_train: bool = True,
+    mean: Optional[List[float]] = None,
+    std: Optional[List[float]] = None,
 ) -> transforms.Compose:
     """
-    resize_strategy : 'pad'  — PadToSquare → Resize(224)
-                      'crop' — RandomResizedCrop (train) / CenterCrop (val)
+    resize_strategy : 'square' — Resize(224, 224) напрямую (рекомендуется)
+                      'pad'    — PadToSquare → Resize(224)
+                      'crop'   — RandomResizedCrop (train) / CenterCrop (val)
     aug_level       : 'heavy' | 'std' | 'light' | 'none'
-
-    Порядок: сначала resize → потом аугментация → ToTensor → Normalize.
-    Такой порядок гарантирует, что пространственные параметры aug (translate,
-    rotate) применяются к фиксированному масштабу 224×224.
+    mean / std      : статистика нормализации (по умолчанию — ImageNet)
     """
+    if mean is None:
+        mean = [0.485, 0.456, 0.406]
+    if std is None:
+        std = [0.229, 0.224, 0.225]
+
     ops = []
 
     # 1. Resize
-    if resize_strategy == "pad":
+    if resize_strategy == "square":
+        ops.append(transforms.Resize((224, 224)))
+    elif resize_strategy == "pad":
         ops.append(PadToSquare(fill=128))
         ops.append(transforms.Resize((224, 224)))
     elif resize_strategy == "crop":
@@ -60,5 +69,5 @@ def get_transforms(
 
     # 3. Нормализация
     ops.append(transforms.ToTensor())
-    ops.append(transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]))
+    ops.append(transforms.Normalize(mean, std))
     return transforms.Compose(ops)

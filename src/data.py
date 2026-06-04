@@ -28,28 +28,122 @@ def prepare_loaders(
     generator: Optional[torch.Generator] = None,
     num_workers: int = 4,
     pin_memory: bool = True,
+    use_sampler: bool = True,
 ) -> Tuple[DataLoader, DataLoader, List[str]]:
     train_ds = datasets.ImageFolder(mod_path / "train", transform=train_transform)
     val_ds = datasets.ImageFolder(mod_path / "val", transform=val_transform)
 
-    sampler = make_weighted_sampler(train_ds.targets, generator=generator)
-
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=batch_size,
-        sampler=sampler,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        drop_last=True,
-        persistent_workers=num_workers > 0,
-        generator=generator,
-    )
+    if use_sampler:
+        sampler = make_weighted_sampler(train_ds.targets, generator=generator)
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=batch_size,
+            sampler=sampler,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            drop_last=True,
+            persistent_workers=num_workers > 0,
+            generator=generator,
+        )
+    else:
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            drop_last=True,
+            persistent_workers=num_workers > 0,
+            generator=generator,
+        )
     val_loader = DataLoader(
         val_ds,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
         pin_memory=pin_memory,
+        persistent_workers=num_workers > 0,
+    )
+    return train_loader, val_loader, train_ds.classes
+
+
+class PairedDataset(torch.utils.data.Dataset):
+    """Синхронная загрузка ДС и УФ тайлов одного физического фрагмента.
+
+    Структура: dataset/{ДС|УФ}/{split}/{class}/*.jpg
+    Имена файлов идентичны между модальностями — строим пересечение per-class.
+    Возвращает: ((img_ds, img_uv), label)
+    """
+
+    def __init__(
+        self,
+        ds_split_root: Path,
+        uv_split_root: Path,
+        ds_transform,
+        uv_transform,
+    ) -> None:
+        self.ds_transform = ds_transform
+        self.uv_transform = uv_transform
+
+        ds_cls = sorted(d.name for d in ds_split_root.iterdir() if d.is_dir())
+        uv_cls = sorted(d.name for d in uv_split_root.iterdir() if d.is_dir())
+        self.classes = sorted(set(ds_cls) & set(uv_cls))
+        self.class_to_idx = {c: i for i, c in enumerate(self.classes)}
+
+        samples: list = []
+        for cls in self.classes:
+            ds_files = {f.name: f for f in (ds_split_root / cls).glob('*.jpg')}
+            uv_files = {f.name: f for f in (uv_split_root / cls).glob('*.jpg')}
+            label = self.class_to_idx[cls]
+            for name in sorted(set(ds_files) & set(uv_files)):
+                samples.append((ds_files[name], uv_files[name], label))
+        self.samples = samples
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int):
+        ds_path, uv_path, label = self.samples[idx]
+        from PIL import Image as PILImage
+        img_ds = PILImage.open(ds_path).convert('RGB')
+        img_uv = PILImage.open(uv_path).convert('RGB')
+        return (self.ds_transform(img_ds), self.uv_transform(img_uv)), label
+
+    @property
+    def targets(self) -> List[int]:
+        return [s[2] for s in self.samples]
+
+
+def prepare_paired_loaders(
+    dataset_root: Path,
+    ds_train_tfm,
+    ds_val_tfm,
+    uv_train_tfm,
+    uv_val_tfm,
+    batch_size: int = 64,
+    generator: Optional[torch.Generator] = None,
+    num_workers: int = 4,
+    pin_memory: bool = True,
+) -> Tuple[DataLoader, DataLoader, List[str]]:
+    train_ds = PairedDataset(
+        dataset_root / 'ДС' / 'train',
+        dataset_root / 'УФ' / 'train',
+        ds_train_tfm, uv_train_tfm,
+    )
+    val_ds = PairedDataset(
+        dataset_root / 'ДС' / 'val',
+        dataset_root / 'УФ' / 'val',
+        ds_val_tfm, uv_val_tfm,
+    )
+    train_loader = DataLoader(
+        train_ds, batch_size=batch_size, shuffle=True,
+        num_workers=num_workers, pin_memory=pin_memory,
+        drop_last=True, persistent_workers=num_workers > 0,
+        generator=generator,
+    )
+    val_loader = DataLoader(
+        val_ds, batch_size=batch_size, shuffle=False,
+        num_workers=num_workers, pin_memory=pin_memory,
         persistent_workers=num_workers > 0,
     )
     return train_loader, val_loader, train_ds.classes

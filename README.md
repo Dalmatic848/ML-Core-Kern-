@@ -7,21 +7,39 @@
 
 ## Задача
 
-По фотографии фрагмента керна (тайл 5 см) определить литотип породы.  
-**8 классов** (после слияния "Уголь" с "Аргиллит"):
+По фотографии фрагмента керна (тайл 10 см) определить литотип породы.  
+**6 классов**:
 
-| # | Класс |
-|---|-------|
-| 0 | Песчаник |
-| 1 | Аргиллит |
-| 2 | Алевролит |
-| 3 | Переслаивание_песчаника,_аргиллита_и_алевролита |
-| 4 | Переслаивание_аргиллита_и_алевролита |
-| 5 | Песчаник_с_прослоями_алевролита |
-| 6 | Песчаник_с_прослоями_аргиллита |
-| 7 | Глинисто-карбонатная_порода |
+| # | Класс | Описание |
+|---|-------|---------|
+| 0 | Песчаник | Только чистый песчаник |
+| 1 | Аргиллит | Аргиллит + угольные разности (уголь — только 82 тайла, мало для отдельного класса) |
+| 2 | Алевролит | Чистый алевролит и разновидности |
+| 3 | Перес_светлое | Переслаивание с прослоями песчаника (светлые текстуры) |
+| 4 | Перес_тёмное | Переслаивание аргиллит+алевролит без песчаника (тёмные текстуры) |
+| 5 | Карбонат | Глинисто-карбонатные и кремнисто-глинистые породы |
 
-Обучаются две независимые модели — по одной на каждую модальность.
+Обучаются три варианта моделей:
+- **ДС** — ResNet18 / ResNet50, только дневной свет
+- **УФ** — ResNet18 / ResNet50, только ультрафиолет
+- **Dual** — DualStreamResNet18 / DualStreamResNet50, совместно ДС + УФ
+
+---
+
+## Таксономия: принцип объединения
+
+**Из исходных геологических разностей → 6 классов** по принципу визуальной отличимости на тайле.
+
+| Было | Стало | Причина |
+|------|-------|---------|
+| Уголь, Аргиллит_углистый, Аргиллит_с_включениями_угля, Уголь_с_прослоями_аргиллита | → Аргиллит | Всего 82 тайла Угля — недостаточно для самостоятельного класса |
+| Переслаивание_аргиллита_и_алевролита, Аргиллит_алевритовый, ... (4 разности) | → Перес_тёмное | Тёмная слоистость без песчаника |
+| Переслаивание_п+а+ал, Песчаник_с_прослоями_*, Чередование_*, ... (12 разностей) | → Перес_светлое | Светлая слоистость с прослоями песчаника |
+| Глинисто-карбонатная_порода + 6 вариантов | → Карбонат | Единый визуальный тип |
+| Песчаник + Песчаник_карбонатный | → Песчаник | Визуально идентичны |
+
+Разделение единого **Переслаивания** на два подкласса — ключевое улучшение v4:  
+старое слияние создавало гетерогенный класс с ~49% тайлов, что смещало все модели к нему.
 
 ---
 
@@ -29,198 +47,272 @@
 
 ```
 ML-Core-Kern-/
+├── config.py                    # Единый конфиг: пути, гиперпараметры, цвета, CLASSES_ORDER
+├── prepare_data.py              # CLI: подготовка данных (все 8 стадий)
+├── train.py                     # CLI: ЕДИНЫЙ скрипт обучения (все арх. и режимы)
+├── visualize_results.py         # CLI: визуализация на фото + метрики
+│
+│   # Устаревшие скрипты обучения (заменены train.py, оставлены для совместимости):
+├── train_run.py                 #   ResNet18 single
+├── train_multimodal.py          #   ResNet18 dual
+├── train_run_rn50.py            #   ResNet50 single
+├── train_multimodal_rn50.py     #   ResNet50 dual
 ├── data/
-│   ├── Digital_core/          # исходные фото + Excel (raw, не трогать)
+│   ├── Digital_core/            # Исходные фото + Excel (raw)
 │   ├── pipeline/
-│   │   ├── csv/               # Excel → CSV (кеш stage 1)
-│   │   └── tiles/             # тайлы по скважинам (кеш stage 2)
-│   └── dataset/               # финальный датасет для обучения
+│   │   ├── csv/                 # Excel → CSV (Stage 1)
+│   │   └── tiles/               # Тайлы по скважинам (Stage 2)
+│   └── dataset/                 # Финальный датасет
 │       ├── ДС/{train,val,test}/{class}/
 │       ├── УФ/{train,val,test}/{class}/
 │       ├── label_encoder.json
-│       └── split_manifest.json
+│       ├── split_manifest.json
+│       └── normalization_stats.json
 ├── src/
-│   ├── utils.py               # set_seed
-│   ├── transforms.py          # PadToSquare, get_transforms
-│   ├── data.py                # prepare_loaders, WeightedRandomSampler
-│   ├── models/resnet.py       # create_resnet18 (freeze_mode, dropout)
-│   ├── training.py            # train_one_epoch, validate, EarlyStopping
-│   ├── losses.py              # FocalLoss, LabelSmoothingCE
-│   └── augmentation.py        # cutmix_data
-├── notebooks/
-│   ├── preparation.ipynb      # пайплайн подготовки данных (6 ячеек)
-│   └── train.ipynb            # обучение + визуализация
-├── results/
-│   └── two_models_v2/
-│       └── train_run_v2/      # веса, история, графики
-├── train_run.py               # скрипт обучения (зеркало train.ipynb)
-└── reports/                   # отчёты (.docx)
+│   ├── utils.py
+│   ├── transforms.py            # get_transforms (resize, aug, mean/std)
+│   ├── data.py                  # prepare_loaders, PairedDataset, prepare_paired_loaders
+│   ├── models/
+│   │   ├── resnet.py            # create_resnet18, create_resnet50
+│   │   └── dual_resnet.py       # DualStreamResNet18/50, create_dual_resnet18/50
+│   ├── training.py              # train_one_epoch (+ batch_scheduler), validate, EarlyStopping
+│   ├── losses.py                # FocalLoss (+ weight, gamma), LabelSmoothingCE, get_criterion
+│   └── augmentation.py          # cutmix_data, cutmix_data_paired
+├── notebooks/                   # ⚠️ УСТАРЕВШИЕ АРТЕФАКТЫ — не использовать
+│   ├── preparation.ipynb        #    (заменён prepare_data.py)
+│   └── visual_1m.ipynb          #    (заменён visualize_results.py)
+└── results/
+    ├── run_v3/                  # Single-stream, 5 классов (лучший single-stream)
+    ├── run_v4/                  # Dual-stream, 6 классов (текущий)
+    └── dataset_stats/
 ```
 
 ---
 
-## Пайплайн подготовки данных (`notebooks/preparation.ipynb`)
+## Пайплайн подготовки данных (`prepare_data.py`)
 
-6 ячеек кода, выполняются последовательно.
-
-### Stage 1 — Excel → CSV
-Читает `.xlsx` из папки каждой скважины (колонки B:G, skiprows=8).  
-Парсит `depth_from`, `depth_to`, `mineral`. Результат: `data/pipeline/csv/{well}.csv`.  
-Повторный запуск пропускает уже созданные файлы (кеш).
-
-### Stage 2 — Кроп + Склейка + Тайлинг
-Для каждой скважины и каждого минерального интервала из CSV:
-1. **Кроп**: из фотографий, перекрывающихся с интервалом `[depth_from, depth_to]`, вырезаются нужные фрагменты.
-2. **Склейка**: кропы из разных фото стыкуются вертикально (один интервал может пересекать несколько фото).
-3. **Тайлинг**: нарезка на тайлы `TILE_CM=5 см` с перекрытием `OVERLAP_CM=1 см`.
-
-Результат: `data/pipeline/tiles/{well}/{ДС|УФ}/{class}/{mineral}_{d_from:.3f}_{d_to:.3f}_frag{i:04d}.jpg`.
-
-> Глубины парсятся из имён фото регуляркой `_(\d+[.,]\d+)\s*-\s*(\d+[.,]\d+)$`  
-> Папка `ФОТО` ищется без учёта регистра (встречается `ФОТО` и `фото`).
-
-### Stage 3 — Сканирование тайлов
-Строит матрицу `well × class × modality → count` из содержимого `pipeline/tiles/`.
-
-### Stage 4 — Стратифицированный сплит по скважинам
-Тайлы одного интервала (~27 см) почти идентичны — random split по тайлам даст data leakage.  
-Поэтому в один сплит попадают **целые скважины**.
-
-Жадный алгоритм без внешних зависимостей: назначает скважины в val и test так, чтобы минимизировать среднеквадратичное отклонение доли каждого класса от целевых `VAL_FRAC=0.10` / `TEST_FRAC=0.10`. Остальные скважины идут в train.
-
-Итог: val% ≈ 10–20% для каждого класса, все классы представлены в train/val/test.
-
-### Stage 5 — Сборка финального датасета
-Копирует тайлы из `pipeline/tiles/` в `dataset/{modality}/{split}/{class}/`.  
-Сохраняет `label_encoder.json` и `split_manifest.json`.
-
-### Stage 6 — Статистика
-Таблица class × split, метрики дисбаланса, проверка полноты.
-
-**Актуальный размер датасета:**
-
-| Сплит | ДС     | УФ     |
-|-------|--------|--------|
-| train | 36 430 | 36 430 |
-| val   | 6 861  | 6 861  |
-| test  | 5 456  | 5 456  |
-
-Дисбаланс train: **8.6:1** (Песчаник 11 911 vs Песчаник_с_прослоями_аргиллита 1 393).
-
----
-
-## Архитектура модели (`src/models/resnet.py`)
-
-**ResNet18** (ImageNet pretrained), классификатор заменён:
-
-```python
-model.fc = nn.Sequential(
-    nn.Dropout(dropout_p),
-    nn.Linear(512, num_classes),
-)
-```
-
-`freeze_mode`:
-- `'none'` — fine-tune всю сеть *(используется для обеих модальностей)*
-- `'partial'` — заморозить conv1, bn1, layer1, layer2
-- `'full'` — обучать только layer4 + fc
-
----
-
-## Обучение (`train_run.py`, `notebooks/train.ipynb`)
-
-### Конфигурация
-
-```python
-CONFIGS = {
-    'ДС': dict(lr=1e-4, wd=1e-4, dropout=0.3, freeze='none', resize='pad',  aug='heavy'),
-    'УФ': dict(lr=1e-4, wd=1e-4, dropout=0.3, freeze='none', resize='crop', aug='std'),
-}
-MAX_EPOCHS = 60  |  PATIENCE = 10  |  BATCH_SIZE = 64
-```
-
-### Трансформы (`src/transforms.py`)
-- `resize='pad'` — `PadToSquare(fill=128)` → `Resize(224)`. Сохраняет пропорции, добавляет серые поля.
-- `resize='crop'` — `RandomResizedCrop(224, scale=(0.85, 1.0))` для train, `CenterCrop(224)` для val.
-- `aug='heavy'` — ColorJitter(0.4/0.4/0.2) + RandomRotation(15°) + HFlip + RandomAffine(translate 10%).
-- `aug='std'` — ColorJitter(0.2/0.2) + HFlip + RandomAffine(translate 10%).
-- Нормализация: ImageNet stats `[0.485, 0.456, 0.406]`.
-
-### Данные (`src/data.py`)
-`WeightedRandomSampler` выравнивает частоту классов в батчах: редкие классы семплируются чаще.
-
-### Оптимизация
-| Компонент | Значение |
-|-----------|---------|
-| Оптимизатор | Adam (lr=1e-4, wd=1e-4) |
-| Расписание LR | ReduceLROnPlateau(mode='max', factor=0.5, patience=3, min_lr=1e-6) |
-| Loss | CrossEntropyLoss |
-| Early stopping | patience=10, min_delta=0.002 по val F1 macro |
-
-### Запуск
 ```bash
-# скрипт (рекомендуется):
-python3 train_run.py 2>&1 | tee results/two_models_v2/train_run_v2/train.log
+python3 prepare_data.py [--force] [--stages 1,2,3,4,5,6,7,8] [--tile-cm N] [--min-tiles N]
 
-# или запустить notebooks/train.ipynb в Jupyter
+# Примеры:
+python3 prepare_data.py --force                    # пересборка с нуля
+python3 prepare_data.py --stages 4,5,6,7           # только сплит + датасет + нормализация
+python3 prepare_data.py --tile-cm 5 --force        # другой размер тайла
+python3 prepare_data.py --min-tiles 50             # ослабить ограничение сплита
 ```
 
-Результаты пишутся в `results/two_models_v2/train_run_v2/`:
-- `ДС_best.pth`, `УФ_best.pth`
-- `ДС_history.json`, `УФ_history.json`
-- `training_results.png`
+8 стадий:
+
+| Stage | Описание |
+|-------|---------|
+| 1 | Excel → CSV (парсинг колонок B:G, skiprows=8) |
+| 2 | Кроп + склейка + тайлинг (TILE_CM=10, OVERLAP_CM=0) |
+| 3 | Сканирование тайлов → матрица well × class × modality |
+| 4 | Стратифицированный жадный сплит по скважинам |
+| 5 | Копирование тайлов в dataset/{modality}/{split}/{class}/ |
+| 6 | Итоговая статистика |
+| 7 | Нормализация: mean/std из 3000 train-тайлов → normalization_stats.json |
+| 8 | Визуальные артефакты (class_distribution.png, tile_examples.png) |
+
+**Актуальный размер датасета (10 см, без перекрытия):**
+
+| Сплит | ДС | УФ |
+|-------|----|----|
+| train | ~13 000 | ~13 000 |
+| val | ~2 100 | ~2 100 |
+| test | ~2 800 | ~2 800 |
+
+Дисбаланс train: ~5:1 (Перес_светлое vs Алевролит).
+
+---
+
+## Архитектуры
+
+### Single-stream: ResNet18 / ResNet50
+
+```
+ResNet18: fc = Dropout → Linear(512 → num_classes)
+ResNet50: fc = Dropout → Linear(2048 → num_classes)
+```
+
+Две независимые модели — по одной на ДС и УФ.
+
+### Dual-stream: DualStreamResNet18 / DualStreamResNet50
+
+```
+ResNet18: backbone_ds/uv → (B, 512)   cat → (B, 1024) → Linear(1024→512) → ReLU → Dropout → Linear(512→N)
+ResNet50: backbone_ds/uv → (B, 2048)  cat → (B, 4096) → Linear(4096→1024) → ReLU → Dropout → Linear(1024→N)
+```
+
+Оба потока обучаются совместно end-to-end. Синхронный CutMix: одна bbox-маска применяется к обоим потокам одновременно.
+
+---
+
+## Обучение
+
+### `train.py` — единый скрипт (основной)
+
+```bash
+python3 train.py run_v5                                              # ResNet18, ДС+УФ
+python3 train.py run_v5         --mode dual                         # ResNet18, dual
+python3 train.py run_rn50_v1    --arch resnet50                     # ResNet50, ДС+УФ
+python3 train.py run_rn50_dual  --arch resnet50 --mode dual         # ResNet50, dual
+python3 train.py run_warm       --arch resnet50 --mode dual \
+                                --warm-start results/run_rn50_v1    # тёплый старт
+```
+
+**Ручная остановка**: введите `q` + Enter во время обучения — завершение после текущей эпохи.
+
+### Конфигурация (`config.py`)
+
+```python
+MODEL_CONFIGS = {
+    'ДС': dict(lr=3e-4, wd=1e-4, dropout=0.5, aug='heavy',
+               loss_type='focal', focal_gamma=2.0, scheduler='onecycle',
+               use_sampler=False, mix_aug=True, clip_grad=1.0),
+    'УФ': dict(lr=3e-4, wd=1e-4, dropout=0.5, aug='std',
+               loss_type='focal', focal_gamma=2.0, scheduler='onecycle',
+               use_sampler=False, mix_aug=True, clip_grad=1.0),
+}
+MAX_EPOCHS=60 | PATIENCE=15 | BATCH_SIZE=64 | DUAL_BATCH_SIZE=32 | WARMUP_EPOCHS=15
+# ResNet50:
+RN50_BATCH_SIZE=32 | RN50_DUAL_BATCH_SIZE=16 | RN50_LR=3e-4
+```
+
+| Компонент | Значение | Причина |
+|-----------|---------|---------|
+| Оптимизатор | Adam, lr=3e-4 | OneCycleLR стартует с lr/10 = 3e-5 |
+| LR-расписание | OneCycleLR (pct_start=0.25) | Warmup 15 эп., затем cosine decay |
+| Loss | FocalLoss (γ=2, class_weights) | Боремся с дисбалансом классов |
+| Аугментация | CutMix + ColorJitter + HFlip + Affine | Снижение переобучения |
+| Нормализация | из normalization_stats.json | DS mean≈0.58, UV mean≈0.19 |
+
+---
+
+## Визуализация (`visualize_results.py`)
+
+```bash
+# Статистика на test-сете (confusion matrix, F1, classification report)
+python3 visualize_results.py run_v4 --dual --no-photos
+
+# Визуализация конкретной скважины и глубины
+python3 visualize_results.py run_v4 --dual --well Харасавэйск_2000 --depth 1613.00
+
+# Только первые 2 скважины из тест-сета
+python3 visualize_results.py run_v4 --dual --wells 2
+
+# Single-stream модели, val-сет
+python3 visualize_results.py run_v3 --split val
+
+# Старые веса (5 классов) — num_classes определяется автоматически из checkpoint
+python3 visualize_results.py run_v3
+```
+
+Сохраняет в `results/{run}/visual/stats/`:
+- `confusion_test.png` — матрица ошибок
+- `per_class_f1_test.png` — F1 по классам
+- `confidence_distribution.png` — уверенность: верные vs ошибочные
+- `classification_report.png` — precision / recall / F1 / support
 
 ---
 
 ## Текущие результаты
 
-| Модальность | F1 macro | Acc  | Лучшая эпоха |
-|-------------|----------|------|--------------|
-| ДС          | 0.40     | 0.45 | 5            |
-| УФ          | 0.28     | 0.36 | 1            |
+### run_v3 — Single-stream, 5 классов (baseline)
 
-**Основная проблема — переобучение**: к эпохе 15 у ДС train loss падает до 0.11, val loss растёт до 2.65. Модель выходит на плато после 5 эпох и затем начинает запоминать тренировочные тайлы.
+| Модальность | F1 macro | Acc | Best epoch |
+|-------------|----------|-----|------------|
+| ДС | **0.488** | 0.712 | 6 |
+| УФ | **0.418** | 0.643 | 7 |
 
----
+**F1 по классам (val):**
 
-## Что было изменено
+| Класс | ДС | УФ |
+|-------|----|----|
+| Переслаивание | 0.784 | 0.753 |
+| Песчаник | 0.757 | 0.573 |
+| Аргиллит | 0.447 | 0.581 |
+| Карбонат | 0.452 | 0.168 |
+| Алевролит | 0.000 | 0.016 |
 
-### Данные
-1. **Слит класс "Уголь" с "Аргиллит"**: весь класс состоял из изображений `Аргиллит_с_включениями_угля` — визуально неотличимых от чистого аргиллита. Шумная разметка занимала 49% val-выборки.
-2. **Стратифицированный сплит**: хардкод скважин заменён жадным алгоритмом. Было: Coal 49% в val, 0.7% от train. Стало: каждый класс 10–20% в val.
-3. **Единый ноутбук подготовки**: `two_models_v1/preparation.ipynb` + `two_models_v2/preparation.ipynb` → `notebooks/preparation.ipynb`. Промежуточных директорий 5 → 2.
-4. **Объединённый Stage 2**: crop → merge → tile в один проход без промежуточного сохранения в v2/v3.
-
-### Обучение
-5. **УФ freeze="partial" → "none"**: UV-текстуры принципиально отличаются от ImageNet, заморозка нижних слоёв не давала им адаптироваться → val loss рос с первой эпохи.
-6. **SGD → Adam**: более быстрая сходимость.
-7. **CosineAnnealingLR → ReduceLROnPlateau**: прежнее расписание уменьшало LR по расписанию независимо от прогресса; при early stop на 15-й эпохе из 50 LR уже стремился к нулю.
-8. **Логирование LR**: добавлен вывод текущего LR в каждой строке лога обучения.
+Главные проблемы: Алевролит F1≈0, Карбонат УФ F1=0.17, best epoch 6–7 из 60 (модель останавливалась слишком рано из-за ReduceLROnPlateau).
 
 ---
 
-## Что можно исследовать
+### run_v4 — Dual-stream, 6 классов (текущий)
 
-### Регуляризация *(приоритет: высокий)*
-Главная проблема сейчас — переобучение. До смены архитектуры нужно победить его:
+| Модель | F1 macro | Acc | Best epoch |
+|--------|----------|-----|------------|
+| Dual ДС+УФ | **0.452** | 0.610 | 2 |
 
-- **Сильнее Dropout**: 0.3 → 0.5 или добавить второй Dropout перед fc.
-- **Label Smoothing**: `LabelSmoothingCE` уже реализован в `src/losses.py` — попробовать `smoothing=0.1–0.2`.
-- **Mixup / CutMix**: `cutmix_data` реализован в `src/augmentation.py`; перемешивание тайлов снижает уверенность модели в конкретных текстурах.
-- **Weighted Loss вместо WeightedRandomSampler**: самплер заставляет модель видеть одни и те же редкие тайлы слишком часто → memorization. Альтернатива: убрать самплер, добавить `class_weight` в CrossEntropyLoss.
-- **Уменьшить LR**: Adam lr=1e-4 слишком агрессивен; попробовать 3e-5 или 1e-5 с warmup.
+**F1 по классам (val):**
 
-### Архитектура
-- **ResNet50** вместо ResNet18: глубже, лучше многомасштабные текстурные признаки.
-- **EfficientNet-B2 / ConvNeXt-Tiny**: современные backbone с лучшим соотношением параметры/качество.
-- **Предобучение на геологических данных**: self-supervised (SimCLR, DINO) на неразмеченных фото керна может улучшить инициализацию по сравнению с ImageNet.
+| Класс | Dual |
+|-------|------|
+| Перес_светлое | **0.79** |
+| Песчаник | **0.77** |
+| Аргиллит | 0.56 |
+| Карбонат | 0.35 |
+| Перес_тёмное | 0.19 |
+| Алевролит | 0.06 |
 
-### Данные и разметка
-- **Укрупнение таксономии**: "Песчаник" vs "Песчаник_с_прослоями_алевролита" неотличимы на 5-сантиметровом тайле без прослоёв. Рассмотреть 4–5 крупных групп: `{Песчаник*, Аргиллит*, Алевролит*, Переслаивание*, Карбонат}`.
-- **Нормализация по датасету**: вместо ImageNet stats (`[0.485, 0.456, 0.406]`) вычислить реальные mean/std из `data/dataset/` — особенно важно для УФ-канала.
-- **Контекст соседних тайлов**: литотип лучше виден в контексте окружающей породы. Варианты: подавать 3 соседних тайла как входы или использовать sequence-модель по глубине (LSTM/Transformer).
-- **Больше скважин**: добавить данные из других месторождений для улучшения генерализации.
+**Ключевые наблюдения:**
+1. **Разделение Переслаивания дало результат**: Перес_светлое F1=0.79 — лучший показатель за всё время. Смешанный класс был источником ошибок.
+2. **Dual-поток улучшил Аргиллит** (0.56 vs 0.45 в ДС run_v3) — УФ добавляет диагностическую информацию.
+3. **Best epoch = 2** — модель останавливается слишком рано. Датасет перестраивался в процессе (7→6 классов), и модель обучалась на неполной версии. Нужен чистый запуск после `prepare_data.py --force`.
+4. **Алевролит по-прежнему F1≈0** — класс слишком редкий (~1 200 train-тайлов) и похож на Аргиллит и Перес_тёмное.
+5. **Карбонат в УФ** — ДС модель (run_v3) давала 0.45, dual 0.35. Требует отдельного внимания.
 
-### Мультимодальность
-- **Поздний фьюжн ДС+УФ**: усреднение или взвешенное голосование логитов двух моделей — самый простой способ использовать обе модальности вместе.
-- **Ранний фьюжн**: конкатенация ДС и УФ по каналу (6-канальный вход) при синхронизации кадров по глубине.
+---
+
+## Что нужно сделать
+
+### Приоритет: высокий
+
+- **Пересборка датасета** — `python3 prepare_data.py --force` с актуальными 6 классами (сейчас label_encoder.json обновлён, но tiles/ ещё содержит Уголь папки)
+- **Переобучение** — `python3 train_multimodal.py run_dual_v2` после пересборки. Ожидаем best epoch > 20
+- **Тёплый старт** — сначала обучить single-stream (`train_run.py run_v5`), затем dual с warm start из этих весов
+
+### Приоритет: средний
+
+- **Алевролит**: focal loss с γ=3-4 специально для него, или объединить с Аргиллитом (4→5 классов)
+- **Перес_тёмное F1=0.19**: 1 859 тайлов — достаточно, но визуально похож на Аргиллит. Попробовать per-class focal
+- **ResNet50 эксперимент** — `train_run_rn50.py` (два single) + `train_multimodal_rn50.py` (один dual), сравнить с ResNet18
+
+### Приоритет: низкий
+
+- **Нормализация by-well** — mean/std из конкретной скважины перед подачей
+- **Больше скважин** — 16 скважин критически мало для надёжного test-gap
+
+---
+
+## История изменений
+
+### v5 (текущая) — 2026-06-04
+
+- **ResNet50 эксперимент**: добавлены `create_resnet50`, `DualStreamResNet50`, скрипты `train_run_rn50.py` и `train_multimodal_rn50.py`
+- **Батч-размеры**: RN50 single=32, RN50 dual=16 (в 2× меньше из-за 2048-dim признаков)
+- **Auto-detect архитектуры**: `visualize_results.py` читает `arch` из `config.json` каждого run
+- **Ноутбуки**: помечены как устаревшие артефакты в структуре проекта
+
+### v4 — 2026-06-04
+
+- **Мультимодальная модель**: DualStreamResNet18 — два ResNet18 backbone, late fusion cat(512+512)→1024→512→N; синхронный CutMix
+- **Таксономия**: Переслаивание разделено на Перес_светлое + Перес_тёмное; Уголь возвращён в Аргиллит (мало данных)
+- **Пайплайн**: ноутбуки заменены на CLI-скрипты (`prepare_data.py`, `visualize_results.py`)
+- **LR-расписание**: OneCycleLR (pct_start=0.25) вместо ReduceLROnPlateau; best epoch ожидается > 20
+- **Loss**: FocalLoss(γ=2, class_weights) — совместная балансировка дисбаланса
+- **Visualizer**: автоматическое определение num_classes из checkpoint — поддерживает старые и новые веса
+
+### v3
+
+- **Таксономия**: 8 → 5 классов по принципу визуальной отличимости
+- **Тайлинг**: TILE_CM 5 → 10 см, OVERLAP_CM 1 → 0 (убраны квазидубликаты)
+- **Нормализация**: per-modality из датасета (DS mean=0.58, UV mean=0.19)
+- **Регуляризация**: LabelSmoothing, CutMix, clip_grad, warmup, class_weights вместо WeightedRandomSampler
+
+### v2
+
+- Слит класс "Уголь" с "Аргиллит"
+- Стратифицированный жадный сплит по скважинам
+- SGD → Adam, CosineAnnealingLR → ReduceLROnPlateau

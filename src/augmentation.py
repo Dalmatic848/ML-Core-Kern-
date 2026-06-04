@@ -31,3 +31,24 @@ def cutmix_data(
     x[:, :, bbx1:bbx2, bby1:bby2] = x_b[:, :, bbx1:bbx2, bby1:bby2]
     lam_adj = 1.0 - (bbx2 - bbx1) * (bby2 - bby1) / (x.size(-1) * x.size(-2))
     return x, y, y_b, lam_adj
+
+
+def cutmix_data_paired(
+    x_ds: torch.Tensor,
+    x_uv: torch.Tensor,
+    y: torch.Tensor,
+    alpha: float = 1.0,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, float]:
+    """Синхронный CutMix: одна bbox-маска применяется к обоим потокам.
+    Возвращает (x_ds_mixed, x_uv_mixed, y_a, y_b, lambda_adj)."""
+    r = np.random.beta(alpha, alpha)
+    lam = max(r, 1 - r)
+    idx = torch.randperm(x_ds.size(0), device=x_ds.device)
+    x_ds_b, x_uv_b, y_b = x_ds[idx], x_uv[idx], y[idx]
+    bbx1, bby1, bbx2, bby2 = rand_bbox(x_ds.size(), lam)
+    x_ds = x_ds.clone()
+    x_uv = x_uv.clone()
+    x_ds[:, :, bbx1:bbx2, bby1:bby2] = x_ds_b[:, :, bbx1:bbx2, bby1:bby2]
+    x_uv[:, :, bbx1:bbx2, bby1:bby2] = x_uv_b[:, :, bbx1:bbx2, bby1:bby2]
+    lam_adj = 1.0 - (bbx2 - bbx1) * (bby2 - bby1) / (x_ds.size(-1) * x_ds.size(-2))
+    return x_ds, x_uv, y, y_b, lam_adj

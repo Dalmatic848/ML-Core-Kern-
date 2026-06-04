@@ -3,6 +3,7 @@
 Все пути, гиперпараметры и визуальные константы берутся отсюда.
 """
 
+import json as _json
 from pathlib import Path
 
 # ── Корень проекта ────────────────────────────────────────────────────────────
@@ -10,95 +11,126 @@ ROOT = Path(__file__).parent
 
 # ── Пути к данным ─────────────────────────────────────────────────────────────
 DATA_ROOT       = ROOT / "data"
-DIGITAL_CORE    = DATA_ROOT / "Digital_core"   # исходные фото + Excel (raw)
+DIGITAL_CORE    = DATA_ROOT / "Digital_core"
 PIPELINE_CSV    = DATA_ROOT / "pipeline" / "csv"
 PIPELINE_TILES  = DATA_ROOT / "pipeline" / "tiles"
 DATASET_ROOT    = DATA_ROOT / "dataset"
 LABEL_ENCODER   = DATASET_ROOT / "label_encoder.json"
 SPLIT_MANIFEST  = DATASET_ROOT / "split_manifest.json"
+NORM_STATS_FILE = DATASET_ROOT / "normalization_stats.json"
 
 # ── Пути к результатам ────────────────────────────────────────────────────────
 RESULTS_ROOT    = ROOT / "results"
 OLD_RESULTS     = ROOT / "old_results"
-DATASET_STATS   = RESULTS_ROOT / "dataset_stats"  # артефакты из preparation.ipynb
+DATASET_STATS   = RESULTS_ROOT / "dataset_stats"
 
 # ── Параметры тайлинга ────────────────────────────────────────────────────────
-TILE_CM     = 5    # высота тайла в сантиметрах
-OVERLAP_CM  = 1    # перекрытие тайлов при нарезке датасета
+TILE_CM     = 5  # высота тайла в сантиметрах (10 см — виден прослой)
+OVERLAP_CM  = 0    # нет перекрытия — убираем квазидубликаты
 
 # ── Параметры датасета ────────────────────────────────────────────────────────
-VAL_FRAC    = 0.10
-TEST_FRAC   = 0.10
-SEED        = 42
+VAL_FRAC         = 0.10
+TEST_FRAC        = 0.10
+SEED             = 42
+MIN_CLASS_TILES  = 100   # минимум тайлов каждого класса в val и test
+
+# ── Таксономия (6 классов) ────────────────────────────────────────────────────
+# Уголь исключён: только 82 тайла на весь датасет — недостаточно для класса.
+# Уголь + Аргиллит_углистый → Аргиллит (как было в v2/v3).
+CLASSES_ORDER = [
+    'Песчаник',
+    'Аргиллит',
+    'Алевролит',
+    'Перес_светлое',   # Переслаивание с прослоями песчаника
+    'Перес_тёмное',    # Переслаивание аргиллит+алевролит (без песчаника)
+    'Карбонат',
+]
 
 # ── Параметры обучения ────────────────────────────────────────────────────────
-BATCH_SIZE   = 64
-MAX_EPOCHS   = 60
-PATIENCE     = 10
-MIN_DELTA    = 0.002
-NUM_WORKERS  = 4
-IMG_SIZE     = 224
-IMAGENET_MEAN = [0.485, 0.456, 0.406]
-IMAGENET_STD  = [0.229, 0.224, 0.225]
+BATCH_SIZE      = 64
+MAX_EPOCHS      = 60
+PATIENCE        = 15
+MIN_DELTA       = 0.001
+NUM_WORKERS     = 4
+IMG_SIZE        = 224
+WARMUP_EPOCHS   = 15   # pct_start для OneCycleLR = 15/60 = 0.25
+DUAL_BATCH_SIZE = 32   # два ResNet18 backbone в памяти
+DUAL_LR         = 3e-4
+
+# ── ResNet50 (больше памяти → меньше батч) ────────────────────────────────────
+RN50_BATCH_SIZE      = 32   # single ResNet50 (2048 features vs 512 у RN18)
+RN50_DUAL_BATCH_SIZE = 24   # два ResNet50 backbone в памяти (4096 на fusion)
+RN50_LR              = 3e-4
+
+# ── Нормализация: загружаем из файла если есть, иначе ImageNet ────────────────
+_IMAGENET_MEAN = [0.485, 0.456, 0.406]
+_IMAGENET_STD  = [0.229, 0.224, 0.225]
+
+# Публичные алиасы для обратной совместимости с visual_1m.ipynb
+IMAGENET_MEAN = _IMAGENET_MEAN
+IMAGENET_STD  = _IMAGENET_STD
+
+if NORM_STATS_FILE.exists():
+    with open(NORM_STATS_FILE, encoding='utf-8') as _f:
+        _ns = _json.load(_f)
+    DS_MEAN = _ns.get('ДС', {}).get('mean', _IMAGENET_MEAN)
+    DS_STD  = _ns.get('ДС', {}).get('std',  _IMAGENET_STD)
+    UV_MEAN = _ns.get('УФ', {}).get('mean', _IMAGENET_MEAN)
+    UV_STD  = _ns.get('УФ', {}).get('std',  _IMAGENET_STD)
+else:
+    DS_MEAN = UV_MEAN = _IMAGENET_MEAN
+    DS_STD  = UV_STD  = _IMAGENET_STD
 
 # ── Конфиги моделей по модальности ───────────────────────────────────────────
 MODEL_CONFIGS = {
-    "ДС": dict(lr=1e-4, wd=1e-4, dropout=0.3, freeze="none", resize="pad",  aug="heavy"),
-    "УФ": dict(lr=1e-4, wd=1e-4, dropout=0.3, freeze="none", resize="crop", aug="std"),
+    "ДС": dict(lr=3e-4, wd=1e-4, dropout=0.5, freeze="none", resize="square", aug="heavy",
+               loss_type="focal", use_sampler=False, mix_aug=True, clip_grad=1.0,
+               scheduler="onecycle", focal_gamma=2.0),
+    "УФ": dict(lr=3e-4, wd=1e-4, dropout=0.5, freeze="none", resize="square", aug="std",
+               loss_type="focal", use_sampler=False, mix_aug=True, clip_grad=1.0,
+               scheduler="onecycle", focal_gamma=2.0),
 }
 MODALITIES = list(MODEL_CONFIGS.keys())
 
 # ── Regex для парсинга глубин из имени файла ──────────────────────────────────
 DEPTH_RE = r"(\d+[.,]\d+)\s*-\s*(\d+[.,]\d+)"
 
-# ── Цветовая палитра классов (по имени) ───────────────────────────────────────
+# ── Цветовая палитра классов ──────────────────────────────────────────────────
 CLASS_PALETTE = {
-    "Песчаник":                                         "#3B82F6",
-    "Аргиллит":                                         "#EF4444",
-    "Алевролит":                                        "#F59E0B",
-    "Переслаивание_песчаника,_аргиллита_и_алевролита":  "#8B5CF6",
-    "Переслаивание_аргиллита_и_алевролита":             "#78716C",
-    "Песчаник_с_прослоями_алевролита":                  "#14B8A6",
-    "Песчаник_с_прослоями_аргиллита":                   "#6EE7B7",
-    "Глинисто-карбонатная_порода":                      "#292524",
-    "unknown":                                          "#E5E7EB",
+    "Песчаник":       "#3B82F6",
+    "Аргиллит":       "#EF4444",
+    "Алевролит":      "#F59E0B",
+    "Перес_светлое":  "#8B5CF6",
+    "Перес_тёмное":   "#4C1D95",
+    "Карбонат":       "#292524",
+    # backward compat
+    "Уголь":          "#1C1917",
+    "Переслаивание":  "#8B5CF6",
+    "unknown":        "#E5E7EB",
 }
 
-# ── Короткие названия классов для отображения на графиках ────────────────────
+# ── Короткие названия классов для графиков ────────────────────────────────────
 CLASS_SHORT = {
-    "Песчаник":                                         "Пс",
-    "Аргиллит":                                         "Ар",
-    "Алевролит":                                        "Ал",
-    "Переслаивание_песчаника,_аргиллита_и_алевролита":  "Пс+Ар+Ал",
-    "Переслаивание_аргиллита_и_алевролита":             "Ар+Ал",
-    "Песчаник_с_прослоями_алевролита":                  "Пс/Ал",
-    "Песчаник_с_прослоями_аргиллита":                   "Пс/Ар",
-    "Глинисто-карбонатная_порода":                      "Гл-Карб",
+    "Песчаник":       "Пс",
+    "Аргиллит":       "Ар",
+    "Алевролит":      "Ал",
+    "Перес_светлое":  "Пер_П",
+    "Перес_тёмное":   "Пер_А",
+    "Карбонат":       "Карб.",
+    # backward compat
+    "Уголь":          "Уг",
+    "Переслаивание":  "Перес.",
 }
 
-# ── Схема сохранения результатов (структура одного run) ───────────────────────
+# ── Схема сохранения результатов ──────────────────────────────────────────────
 # results/
 # └── {run_name}/
-#     ├── config.json              — гиперпараметры запуска
-#     ├── ДС_best.pth              — веса лучшей модели ДС
-#     ├── УФ_best.pth              — веса лучшей модели УФ
-#     ├── ДС_history.json          — история метрик по эпохам (ДС)
-#     ├── УФ_history.json          — история метрик по эпохам (УФ)
-#     ├── ДС_test_metrics.json     — финальные метрики на тест-сете (ДС)
-#     ├── УФ_test_metrics.json     — финальные метрики на тест-сете (УФ)
+#     ├── config.json
+#     ├── ДС_best.pth / УФ_best.pth
+#     ├── ДС_history.json / УФ_history.json
+#     ├── ДС_test_metrics.json / УФ_test_metrics.json
 #     └── plots/
-#         ├── curves_ДС.png        — loss + F1/Acc/Prec/Rec по эпохам
-#         ├── curves_УФ.png
-#         ├── confusion_ДС.png     — матрица ошибок на val (нормированная)
-#         ├── confusion_УФ.png
-#         ├── per_class_f1_ДС.png  — F1 по классам, bar chart
-#         └── per_class_f1_УФ.png
-#
-# Визуализации (ноутбук 3 visual_1m.ipynb) пишут в:
-# results/{run_name}/visual/
-#     ├── {well}_{d_from}-{d_to}_full.png   — фото + предсказание + разметка
-#     └── stats/
-#         ├── class_hist.png       — гистограмма предсказанных классов
-#         ├── confidence_hist.png  — распределение уверенности модели
-#         ├── per_class_f1.png     — F1 по классам на тест-сете
-#         └── confusion.png        — матрица ошибок на тест-сете
+#         ├── curves_{mod}.png
+#         ├── confusion_{mod}.png
+#         ├── per_class_f1_{mod}.png
+#         └── metrics_summary.png

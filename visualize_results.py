@@ -100,10 +100,6 @@ def _load_dual(pth: Path, arch: str = 'resnet18') -> torch.nn.Module:
     return model.to(DEVICE).eval()
 
 
-def _classes_from_checkpoint(state: dict, dual: bool) -> int:
-    return _num_classes_from_state(state, dual)
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Вспомогательные функции
 # ─────────────────────────────────────────────────────────────────────────────
@@ -188,13 +184,23 @@ def _predict_dual(img_ds: np.ndarray, img_uv: np.ndarray,
     return preds
 
 
+def _text_color(hex_color: str) -> str:
+    """Возвращает 'black' или 'white' для читаемого текста на фоне hex_color."""
+    try:
+        r, g, b = int(hex_color[1:3], 16), int(hex_color[3:5], 16), int(hex_color[5:7], 16)
+        return 'black' if (0.299 * r + 0.587 * g + 0.114 * b) / 255 > 0.5 else 'white'
+    except Exception:
+        return 'white'
+
+
 def _draw_strip(ax, segments, z_top, z_bot, title='', show_conf=False):
     ax.set_xlim(0, 1); ax.set_ylim(z_bot, z_top)
     for y0, y1, color, conf in segments:
         ax.fill_betweenx([y0, y1], 0.05, 0.95, color=color, linewidth=0)
-        if show_conf and conf is not None and conf > 0.65 and (y1 - y0) > 0.03:
-            ax.text(0.5, (y0 + y1) / 2, f'{conf:.0%}', ha='center', va='center',
-                    fontsize=6, color='white', fontweight='bold')
+        if show_conf and conf is not None and conf > 0.50 and (y1 - y0) > 0.02:
+            tc = _text_color(color) if isinstance(color, str) and color.startswith('#') else 'white'
+            ax.text(0.5, (y0 + y1) / 2, f'{conf:.0%}',
+                    ha='center', va='center', fontsize=7, color=tc, fontweight='bold')
     ax.set_xticks([]); ax.set_title(title, fontsize=10, pad=4)
     for sp in ax.spines.values():
         sp.set_visible(False)
@@ -217,7 +223,7 @@ def visualize_photo(well_name: str, models_dict: dict, tfms_dict: dict,
         img_ds = np.array(Image.open(ds_path).convert('RGB'))
         img_uv = np.array(Image.open(uv_path).convert('RGB')) if uv_path else img_ds
 
-        # Предсказания
+        # ── Предсказания ──────────────────────────────────────────────────────
         if dual_model is not None:
             preds_dual = _predict_dual(img_ds, img_uv, dual_model, tfm_ds_dual, tfm_uv_dual, d_from, d_to)
             strips = {'Dual ДС+УФ': preds_dual}
@@ -227,34 +233,56 @@ def visualize_photo(well_name: str, models_dict: dict, tfms_dict: dict,
                 img = img_ds if mod == 'ДС' else img_uv
                 strips[f'Модель {mod}'] = _predict_single(img, model, tfms_dict[mod], d_from, d_to)
 
-        # Разметка геолога
+        # ── Разметка геолога ─────────────────────────────────────────────────
+        # Сохраняем имя минерала для легенды; несколько минералов одного цвета
+        # группируются вместе (они были слиты в один класс при подготовке данных).
         sub = markup_df[(markup_df.depth_from < d_to) & (markup_df.depth_to > d_from)]
         markup_segs = []
+        markup_color_to_names: Dict[str, set] = {}   # hex → {имена минералов}
         for _, row in sub.iterrows():
             y0  = max(row['depth_from'], d_from)
             y1  = min(row['depth_to'],   d_to)
-            nm  = str(row['mineral']).strip().replace(' ', '_')
-            col = _cfg.CLASS_PALETTE.get(nm, _cfg.CLASS_PALETTE.get(str(row['mineral']).strip(), _cfg.CLASS_PALETTE['unknown']))
+            raw = str(row['mineral']).strip()
+            key = raw.replace(' ', '_')
+            col = _cfg.CLASS_PALETTE.get(key,
+                  _cfg.CLASS_PALETTE.get(raw,
+                  _cfg.CLASS_PALETTE['unknown']))
             if y1 - y0 > 0.001:
                 markup_segs.append((y0, y1, col, None))
+                markup_color_to_names.setdefault(col, set()).add(raw)
 
-        n_strips  = len(strips)
-        width_ratios = [2.5, 2.5] + [0.75] * n_strips + [0.75, 2.8]
-        fig = plt.figure(figsize=(5 * (3 + n_strips), 11))
-        gs  = plt.GridSpec(1, 3 + n_strips + 1, figure=fig,
-                           width_ratios=width_ratios, wspace=0.10)
+        # ── Размер фигуры из реальных пропорций фото ─────────────────────────
+        # При aspect='auto' изображение растягивается под axes.
+        # Задаём ширину фото-колонки так, чтобы соответствовала пикселям.
+        h_px, w_px = img_ds.shape[:2]
+        fig_h   = 12.0
+        photo_w = max(1.2, min(fig_h * w_px / h_px, 3.5))  # дюймов на фото-колонку
+        strip_w = 0.85
+        legend_w = 3.2
+        n_strips = len(strips)
+        width_ratios = [photo_w, photo_w] + [strip_w] * n_strips + [strip_w, legend_w]
+        fig_w = sum(width_ratios) / 0.90   # 0.90 учитывает wspace
+
+        fig = plt.figure(figsize=(fig_w, fig_h))
+        n_cols = 2 + n_strips + 1 + 1      # фото ДС, фото УФ, strips, разметка, легенда
+        gs  = plt.GridSpec(1, n_cols, figure=fig, width_ratios=width_ratios, wspace=0.08)
 
         extent = [0, 1, d_to, d_from]
+
         ax_ds = fig.add_subplot(gs[0, 0])
         ax_ds.imshow(img_ds, aspect='auto', extent=extent)
-        ax_ds.set_title('Фото ДС', fontsize=11); ax_ds.set_xticks([])
+        ax_ds.set_title('Фото ДС', fontsize=11, pad=4)
+        ax_ds.set_xticks([])
         ax_ds.yaxis.set_tick_params(labelsize=8)
+        ax_ds.yaxis.set_major_formatter(plt.FormatStrFormatter('%.2f'))
 
         ax_uv = fig.add_subplot(gs[0, 1])
         ax_uv.imshow(img_uv, aspect='auto', extent=extent)
-        ax_uv.set_title('Фото УФ', fontsize=11); ax_uv.set_xticks([]); ax_uv.set_yticks([])
+        ax_uv.set_title('Фото УФ', fontsize=11, pad=4)
+        ax_uv.set_xticks([]); ax_uv.set_yticks([])
 
-        shown_cls: Dict[str, str] = {}
+        # ── Полосы модели ─────────────────────────────────────────────────────
+        model_cls_shown: Dict[str, str] = {}   # имя класса → цвет
         for si, (strip_title, preds) in enumerate(strips.items()):
             ax = fig.add_subplot(gs[0, 2 + si])
             segs = [(p['depth_from'], p['depth_to'], idx2color[p['class_idx']], p['conf'])
@@ -262,20 +290,42 @@ def visualize_photo(well_name: str, models_dict: dict, tfms_dict: dict,
             _draw_strip(ax, segs, d_from, d_to, strip_title, show_conf=True)
             ax.set_yticks([])
             for p in preds:
-                shown_cls[idx2name[p['class_idx']]] = idx2color[p['class_idx']]
+                nm = idx2name[p['class_idx']]
+                model_cls_shown[nm] = idx2color[p['class_idx']]
 
+        # ── Полоса разметки ───────────────────────────────────────────────────
         ax_markup = fig.add_subplot(gs[0, 2 + n_strips])
         _draw_strip(ax_markup, markup_segs, d_from, d_to, 'Разметка\nгеолога')
         ax_markup.set_yticks([])
-        for y0, y1, col, _ in markup_segs:
-            shown_cls[str(col)] = col
 
+        # ── Легенда: две секции — модель и геолог ─────────────────────────────
         ax_leg = fig.add_subplot(gs[0, 3 + n_strips])
-        ax_leg.axis('off'); ax_leg.set_title('Легенда', fontsize=11, fontweight='bold')
-        handles = [mpatches.Patch(facecolor=color, edgecolor='#555', label=name)
-                   for name, color in sorted(shown_cls.items()) if not name.startswith('#')]
-        ax_leg.legend(handles=handles, loc='upper left', fontsize=9, frameon=True,
-                      bbox_to_anchor=(0.0, 1.0))
+        ax_leg.axis('off')
+
+        handles: list = []
+
+        if model_cls_shown:
+            handles.append(mpatches.Patch(
+                facecolor='none', edgecolor='none', label='── Модель ──'))
+            for nm, col in sorted(model_cls_shown.items()):
+                handles.append(mpatches.Patch(
+                    facecolor=col, edgecolor='#444', linewidth=0.7, label=nm))
+
+        if markup_color_to_names:
+            handles.append(mpatches.Patch(
+                facecolor='none', edgecolor='none', label='── Геолог ──'))
+            for col, names in sorted(markup_color_to_names.items()):
+                # Группируем минералы одного цвета (слитые классы)
+                label = ' / '.join(n.replace('_', ' ')[:18]
+                                   for n in sorted(names)[:2])
+                if len(names) > 2:
+                    label += f' +{len(names) - 2}'
+                handles.append(mpatches.Patch(
+                    facecolor=col, edgecolor='#444', linewidth=0.7, label=label))
+
+        ax_leg.legend(handles=handles, loc='upper left', fontsize=8.5,
+                      frameon=True, bbox_to_anchor=(0.0, 1.0),
+                      borderpad=0.8, handlelength=1.5)
 
         fig.suptitle(f'{well_name}  |  {d_from:.2f} – {d_to:.2f} м',
                      fontsize=13, fontweight='bold', y=1.01)
@@ -344,17 +394,19 @@ def plot_stats(results: dict, stats_dir: Path) -> None:
         short = [_cfg.CLASS_SHORT.get(c, c[:8]) for c in res['classes']]
         cm    = confusion_matrix(res['labels'], res['preds'],
                                  labels=list(range(len(res['classes']))), normalize='true')
-        ConfusionMatrixDisplay(cm, display_labels=short).plot(
-            ax=ax, colorbar=True, xticks_rotation=40, values_format='.2f')
-        ax.set_title(f'Confusion matrix — {mod_name}', fontsize=11)
-    plt.suptitle('Confusion Matrix', fontsize=13)
+        disp = ConfusionMatrixDisplay(cm, display_labels=short)
+        disp.plot(ax=ax, colorbar=True, xticks_rotation=40, values_format='.0%')
+        ax.set_xlabel('Предсказано', fontsize=10)
+        ax.set_ylabel('Истинный класс', fontsize=10)
+        ax.set_title(f'Confusion matrix — {mod_name}\n(нормировано по строкам)', fontsize=11)
+    plt.suptitle('Матрица ошибок', fontsize=13, fontweight='bold')
     plt.tight_layout()
     fig.savefig(stats_dir / 'confusion_test.png', dpi=150, bbox_inches='tight')
     plt.close()
     print(f'  {stats_dir}/confusion_test.png')
 
     # Per-class F1
-    fig, axes = plt.subplots(1, n_mods, figsize=(9 * n_mods, 5), sharey=True)
+    fig, axes = plt.subplots(1, n_mods, figsize=(10 * n_mods, 5), sharey=True)
     if n_mods == 1:
         axes = [axes]
     for ax, (mod_name, res) in zip(axes, results.items()):
@@ -363,17 +415,23 @@ def plot_stats(results: dict, stats_dir: Path) -> None:
         colors = [_cfg.CLASS_PALETTE.get(c, '#94A3B8') for c in class_names]
         f1_per = f1_score(res['labels'], res['preds'],
                           labels=list(range(len(class_names))), average=None, zero_division=0)
-        macro  = f1_per.mean()
+        support = np.bincount(res['labels'], minlength=len(class_names))
+        macro   = f1_per.mean()
         bars = ax.bar(short, f1_per, color=colors, edgecolor='#333', linewidth=0.6)
-        for bar, val in zip(bars, f1_per):
-            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.01,
+        for bar, val, sup in zip(bars, f1_per, support):
+            # F1 значение над баром
+            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.012,
                     f'{val:.2f}', ha='center', va='bottom', fontsize=9, fontweight='bold')
+            # Количество примеров под баром
+            ax.text(bar.get_x() + bar.get_width() / 2, 0.01,
+                    f'n={sup:,}', ha='center', va='bottom', fontsize=7, color='#555')
         ax.axhline(macro, color='#64748B', linestyle='--', linewidth=1.5,
-                   label=f'macro={macro:.3f}')
+                   label=f'macro F1 = {macro:.3f}')
         ax.set_title(f'F1 по классам — {mod_name}', fontsize=11)
-        ax.set_ylim(0, 1.08); ax.tick_params(axis='x', rotation=35); ax.legend()
+        ax.set_ylim(0, 1.12); ax.tick_params(axis='x', rotation=35); ax.legend()
         for s in ['top', 'right']:
             ax.spines[s].set_visible(False)
+    plt.suptitle('F1 по классам', fontsize=13, fontweight='bold')
     plt.tight_layout()
     fig.savefig(stats_dir / 'per_class_f1_test.png', dpi=150, bbox_inches='tight')
     plt.close()
@@ -399,34 +457,42 @@ def plot_stats(results: dict, stats_dir: Path) -> None:
     print(f'  {stats_dir}/confidence_distribution.png')
 
     # Classification report table
-    fig, axes = plt.subplots(1, n_mods, figsize=(11 * n_mods, 5))
+    fig, axes = plt.subplots(1, n_mods, figsize=(12 * n_mods, max(5, len(results[next(iter(results))]['classes']) * 0.7 + 2.5)))
     if n_mods == 1:
         axes = [axes]
     for ax, (mod_name, res) in zip(axes, results.items()):
         class_names = res['classes']
-        short = [_cfg.CLASS_SHORT.get(c, c[:10]) for c in class_names]
+        # Полные имена классов в таблице (не сокращённые)
         prec, rec, f1_per, support = precision_recall_fscore_support(
             res['labels'], res['preds'], labels=list(range(len(class_names))), zero_division=0)
-        macro_f1 = f1_score(res['labels'], res['preds'], average='macro', zero_division=0)
-        acc      = accuracy_score(res['labels'], res['preds'])
-        rows = [[sn, f'{p:.2f}', f'{r:.2f}', f'{f:.2f}', f'{s:,}']
-                for sn, p, r, f, s in zip(short, prec, rec, f1_per, support)]
-        rows.append(['macro avg', '', '', f'{macro_f1:.2f}', ''])
-        rows.append([f'Accuracy {acc:.3f}', '', '', '', f'{len(res["labels"]):,}'])
+        macro_f1  = f1_score(res['labels'], res['preds'], average='macro', zero_division=0)
+        weight_f1 = f1_score(res['labels'], res['preds'], average='weighted', zero_division=0)
+        acc       = accuracy_score(res['labels'], res['preds'])
+
+        rows = [[cn, f'{p:.3f}', f'{r:.3f}', f'{f:.3f}', f'{s:,}']
+                for cn, p, r, f, s in zip(class_names, prec, rec, f1_per, support)]
+        rows.append(['─' * 12,  '─'*5, '─'*5, '─'*5, '─'*6])
+        rows.append(['macro avg',    '',          '',          f'{macro_f1:.3f}',  ''])
+        rows.append(['weighted avg', '',          '',          f'{weight_f1:.3f}', ''])
+        rows.append([f'Accuracy',    '',          '',          f'{acc:.3f}',       f'{len(res["labels"]):,}'])
 
         ax.axis('off')
-        tbl = ax.table(cellText=rows, colLabels=['Класс', 'Prec', 'Rec', 'F1', 'Support'],
+        tbl = ax.table(cellText=rows,
+                       colLabels=['Класс', 'Precision', 'Recall', 'F1', 'Support'],
                        cellLoc='center', loc='center')
-        tbl.auto_set_font_size(False); tbl.set_fontsize(9); tbl.scale(1.0, 1.5)
+        tbl.auto_set_font_size(False); tbl.set_fontsize(9); tbl.scale(1.0, 1.6)
+        n_cls = len(class_names)
         for (r, c), cell in tbl.get_celld().items():
             if r == 0:
                 cell.set_facecolor('#1E3A5F'); cell.set_text_props(color='white', fontweight='bold')
-            elif r >= len(class_names) + 1:
+            elif r == n_cls + 1:  # разделитель
+                cell.set_facecolor('#F1F5F9')
+            elif r > n_cls + 1:   # итоговые строки
                 cell.set_facecolor('#E2E8F0'); cell.set_text_props(fontweight='bold')
             elif r % 2 == 0:
                 cell.set_facecolor('#F8FAFC')
             cell.set_edgecolor('#CBD5E1')
-        ax.set_title(f'Classification Report — {mod_name}', fontsize=11, pad=12)
+        ax.set_title(f'Classification Report — {mod_name}', fontsize=11, pad=12, fontweight='bold')
 
         print(f'\n{mod_name}:')
         print(classification_report(res['labels'], res['preds'],

@@ -97,37 +97,38 @@ COMMON_TRAIN="--scheduler plateau --max-epochs 40 --patience 10"
 DATASET_6CLS="--dataset-root data/dataset_random"
 DATASET_SOFT="--dataset-root data/dataset_soft"
 
+# Нумерация продолжает хронологию results/: run_01..run_12 уже существуют
 TOTAL=5
 
-# [1] ResNet18 + soft labels + plateau
-# Самый быстрый. Тестируем soft+plateau — лучшее из обоих миров
-run_experiment 1 "rn18_soft_plateau" \
-    "python3 train.py run_soft_plateau --mode dual --soft-labels $DATASET_SOFT $COMMON_TRAIN" \
-    "python3 visualize_soft.py --run run_soft_plateau --no-columns"
+# [13] ResNet18 + soft labels + plateau
+# Проверяем soft+plateau вместе — оба улучшения из сегодняшнего дня
+run_experiment 13 "r18_soft_plateau" \
+    "python3 train.py run_13_r18_soft_plateau --mode dual --soft-labels $DATASET_SOFT $COMMON_TRAIN" \
+    "python3 visualize_soft.py --run run_13_r18_soft_plateau --no-columns"
 
-# [2] ResNet50 + 6 классов + plateau
-# Сравниваем RN50 vs RN18 при правильном планировщике
-run_experiment 2 "rn50_plateau" \
-    "python3 train.py run_rn50_plateau --mode dual --arch resnet50 $DATASET_6CLS $COMMON_TRAIN" \
-    "python3 visualize_results.py run_rn50_plateau --dual $DATASET_6CLS --no-photos"
+# [14] ResNet50 + 6 классов + plateau
+# RN50 с правильным планировщиком — раньше RN50 запускали с OneCycleLR
+run_experiment 14 "r50_plateau" \
+    "python3 train.py run_14_r50_plateau --mode dual --arch resnet50 $DATASET_6CLS $COMMON_TRAIN" \
+    "python3 visualize_results.py run_14_r50_plateau --dual $DATASET_6CLS --no-photos"
 
-# [3] EfficientNet-B3 + 6 классов + plateau
-# Современная архитектура, меньше параметров чем RN50, возможно лучше
-run_experiment 3 "effb3_plateau" \
-    "python3 train.py run_effb3_plateau --mode dual --arch efficientnet_b3 $DATASET_6CLS $COMMON_TRAIN" \
-    "python3 visualize_results.py run_effb3_plateau --dual $DATASET_6CLS --no-photos"
+# [15] EfficientNet-B3 + 6 классов + plateau
+# Современная лёгкая архитектура (24.5M), часто лучше RN50 на ограниченных данных
+run_experiment 15 "effb3_plateau" \
+    "python3 train.py run_15_effb3_plateau --mode dual --arch efficientnet_b3 $DATASET_6CLS $COMMON_TRAIN" \
+    "python3 visualize_results.py run_15_effb3_plateau --dual $DATASET_6CLS --no-photos"
 
-# [4] ConvNeXt-Tiny + 6 классов + plateau
-# Современная сверточная архитектура (2022), часто превосходит ResNet
-run_experiment 4 "convnext_plateau" \
-    "python3 train.py run_convnext_plateau --mode dual --arch convnext_tiny $DATASET_6CLS $COMMON_TRAIN" \
-    "python3 visualize_results.py run_convnext_plateau --dual $DATASET_6CLS --no-photos"
+# [16] ConvNeXt-Tiny + 6 классов + plateau
+# Современная свёрточная архитектура 2022 года (56.8M), конкурирует с ViT
+run_experiment 16 "convnext_plateau" \
+    "python3 train.py run_16_convnext_plateau --mode dual --arch convnext_tiny $DATASET_6CLS $COMMON_TRAIN" \
+    "python3 visualize_results.py run_16_convnext_plateau --dual $DATASET_6CLS --no-photos"
 
-# [5] ResNet50 + soft labels + plateau
-# Мощная модель + правильные метки — финальный эксперимент если успеет
-run_experiment 5 "rn50_soft_plateau" \
-    "python3 train.py run_rn50_soft_plateau --mode dual --arch resnet50 --soft-labels $DATASET_SOFT $COMMON_TRAIN" \
-    "python3 visualize_soft.py --run run_rn50_soft_plateau --no-columns"
+# [17] ResNet50 + soft labels + plateau
+# Мощная модель + правильные метки — финальный эксперимент если влезет
+run_experiment 17 "r50_soft_plateau" \
+    "python3 train.py run_17_r50_soft_plateau --mode dual --arch resnet50 --soft-labels $DATASET_SOFT $COMMON_TRAIN" \
+    "python3 visualize_soft.py --run run_17_r50_soft_plateau --no-columns"
 
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
@@ -141,8 +142,8 @@ import json
 from pathlib import Path
 
 results_root = Path('results')
-for run_name in ['run_soft_plateau', 'run_rn50_plateau', 'run_effb3_plateau',
-                 'run_convnext_plateau', 'run_rn50_soft_plateau']:
+for run_name in ['run_13_r18_soft_plateau', 'run_14_r50_plateau', 'run_15_effb3_plateau',
+                 'run_16_convnext_plateau', 'run_17_r50_soft_plateau']:
     p = results_root / run_name / 'metrics_summary.json'
     if not p.exists():
         print(f"  {run_name}: нет metrics_summary.json")

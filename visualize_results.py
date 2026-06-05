@@ -35,6 +35,7 @@ from sklearn.metrics import (
 )
 from torch.utils.data import DataLoader
 from torchvision import datasets as tv_datasets
+from tqdm import tqdm
 
 import config as _cfg
 from src.models.resnet import create_resnet18, create_resnet50
@@ -58,11 +59,10 @@ def _num_classes_from_state(state: dict, dual: bool = False) -> int:
     key = 'head.4.weight' if dual else 'fc.1.weight'
     if key in state:
         return state[key].shape[0]
-    # Fallback: ищем любой ключ с 'weight' в fc или head
-    for k, v in state.items():
-        if ('fc' in k or 'head' in k) and k.endswith('.weight') and v.dim() == 2:
-            # 512=single RN18, 1024=dual RN18 fusion, 2048=single RN50, 4096=dual RN50 fusion
-            if v.shape[1] in (512, 1024, 2048, 4096):
+    # Fallback: ищем последний Linear-слой (head или fc или classifier)
+    for k, v in reversed(list(state.items())):
+        if k.endswith('.weight') and v.dim() == 2:
+            if any(s in k for s in ('head.', 'fc.', 'classifier.')):
                 return v.shape[0]
     raise ValueError(f'Не удалось определить num_classes из checkpoint. Ключи: {list(state)[:10]}')
 
@@ -92,8 +92,13 @@ def _load_single(pth: Path, modality: str, arch: str = 'resnet18') -> torch.nn.M
 def _load_dual(pth: Path, arch: str = 'resnet18') -> torch.nn.Module:
     state = torch.load(pth, map_location=DEVICE, weights_only=True)
     n = _num_classes_from_state(state, dual=True)
-    if arch in ('dual_resnet50', 'resnet50'):
+    # Определяем класс модели по имени архитектуры из config.json
+    arch_clean = arch.replace('dual_', '').replace('-', '_')
+    if arch_clean in ('resnet50',):
         model = create_dual_resnet50(n, dropout_p=0.5)
+    elif arch_clean in ('efficientnet_b3', 'efficientnet_b4', 'convnext_tiny', 'swin_t'):
+        from src.models.backbones import create_dual
+        model = create_dual(arch_clean, n, dropout_p=0.5)
     else:
         model = create_dual_resnet18(n, dropout_p=0.5)
     model.load_state_dict(state, strict=True)
@@ -361,25 +366,76 @@ def collect_predictions_single(model, modality: str, split: str):
 
 
 @torch.no_grad()
-def collect_predictions_dual(model, split: str):
+def collect_predictions_dual(model, split: str, n_tta: int = 1, per_well_norm: bool = False):
     from src.data import PairedDataset
     cfg_ds = _cfg.MODEL_CONFIGS['ДС']
     cfg_uv = _cfg.MODEL_CONFIGS['УФ']
-    ds = PairedDataset(
-        _cfg.DATASET_ROOT / 'ДС' / split,
-        _cfg.DATASET_ROOT / 'УФ' / split,
-        get_transforms(cfg_ds['resize'], 'none', False, _cfg.DS_MEAN, _cfg.DS_STD),
-        get_transforms(cfg_uv['resize'], 'none', False, _cfg.UV_MEAN, _cfg.UV_STD),
-    )
-    loader = DataLoader(ds, batch_size=64, shuffle=False, num_workers=4,
-                        pin_memory=(DEVICE.type == 'cuda'))
+
+    if n_tta <= 1 and not per_well_norm:
+        # Быстрый путь: DataLoader без TTA
+        ds = PairedDataset(
+            _cfg.DATASET_ROOT / 'ДС' / split,
+            _cfg.DATASET_ROOT / 'УФ' / split,
+            get_transforms(cfg_ds['resize'], 'none', False, _cfg.DS_MEAN, _cfg.DS_STD),
+            get_transforms(cfg_uv['resize'], 'none', False, _cfg.UV_MEAN, _cfg.UV_STD),
+        )
+        loader = DataLoader(ds, batch_size=64, shuffle=False, num_workers=4,
+                            pin_memory=(DEVICE.type == 'cuda'))
+        all_labels, all_preds, all_probs = [], [], []
+        for (x_ds, x_uv), labels in loader:
+            probs = F.softmax(model(x_ds.to(DEVICE), x_uv.to(DEVICE)), dim=1).cpu().numpy()
+            all_labels.extend(labels.numpy())
+            all_preds.extend(probs.argmax(axis=1))
+            all_probs.append(probs)
+        return np.array(all_labels), np.array(all_preds), np.vstack(all_probs), ds.classes
+
+    # TTA / per-well norm: побайтовый инференс
+    ds_root_ds = _cfg.DATASET_ROOT / 'ДС' / split
+    ds_root_uv = _cfg.DATASET_ROOT / 'УФ' / split
+    classes = sorted(d.name for d in ds_root_ds.iterdir() if d.is_dir())
+    class_to_idx = {c: i for i, c in enumerate(classes)}
+
+    # Группируем файлы по скважинам (первая часть имени файла до '_')
+    from collections import defaultdict as _dd
+    well_groups = _dd(list)  # well_name → [(ds_path, uv_path, label)]
+    for cls in classes:
+        ds_files = {f.name: f for f in (ds_root_ds / cls).glob('*.jpg')}
+        uv_files = {f.name: f for f in (ds_root_uv / cls).glob('*.jpg')}
+        label = class_to_idx[cls]
+        for name in sorted(set(ds_files) & set(uv_files)):
+            # well_name: всё до первого '_' в имени файла (Харасавэйск_1700 → Харасавэйск)
+            # Но в именах вида "Харасавэйск_1700" хранится в имени директории родителя
+            # Используем хак: берём имя из родительской папки ДС-файла (это скважина)
+            # Файл находится в: dataset/ДС/split/class/*.jpg  → well не зашит напрямую
+            # В именах тайлов: {mineral}_{d_from}_{d_to}_frag{NNNN}.jpg — скважина не указана
+            # Поэтому группируем по директории скважины из data/pipeline/tiles,
+            # но в dataset структуре скважина не различима. Для per-well norm
+            # используем приближение: все тайлы одного split класса вместе.
+            well_groups['_all'].append((ds_files[name], uv_files[name], label))
+
+    if per_well_norm:
+        # Для per-well norm вычисляем stats из всех test-тайлов ДС и УФ
+        print('  [per-well norm] Вычисление статистик из test-тайлов...')
+        well_mean_ds, well_std_ds = _compute_well_stats(ds_root_ds, 'ДС')
+        well_mean_uv, well_std_uv = _compute_well_stats(ds_root_uv, 'УФ')
+        print(f'  ДС: mean={[round(v,3) for v in well_mean_ds]}  std={[round(v,3) for v in well_std_ds]}')
+        print(f'  УФ: mean={[round(v,3) for v in well_mean_uv]}  std={[round(v,3) for v in well_std_uv]}')
+        tfm_ds = _make_well_transform(cfg_ds['resize'], well_mean_ds, well_std_ds)
+        tfm_uv = _make_well_transform(cfg_uv['resize'], well_mean_uv, well_std_uv)
+    else:
+        tfm_ds = get_transforms(cfg_ds['resize'], 'none', False, _cfg.DS_MEAN, _cfg.DS_STD)
+        tfm_uv = get_transforms(cfg_uv['resize'], 'none', False, _cfg.UV_MEAN, _cfg.UV_STD)
+
     all_labels, all_preds, all_probs = [], [], []
-    for (x_ds, x_uv), labels in loader:
-        probs = F.softmax(model(x_ds.to(DEVICE), x_uv.to(DEVICE)), dim=1).cpu().numpy()
-        all_labels.extend(labels.numpy())
-        all_preds.extend(probs.argmax(axis=1))
+    samples = well_groups['_all']
+    for ds_path, uv_path, label in tqdm(samples, desc='TTA inference'):
+        tile_ds = Image.open(ds_path).convert('RGB')
+        tile_uv = Image.open(uv_path).convert('RGB')
+        probs = _tta_probs_dual(tile_ds, tile_uv, tfm_ds, tfm_uv, model, n_tta)
+        all_labels.append(label)
+        all_preds.append(int(probs.argmax()))
         all_probs.append(probs)
-    return np.array(all_labels), np.array(all_preds), np.vstack(all_probs), ds.classes
+    return np.array(all_labels), np.array(all_preds), np.vstack(all_probs), classes
 
 
 def plot_stats(results: dict, stats_dir: Path) -> None:
@@ -508,6 +564,76 @@ def plot_stats(results: dict, stats_dir: Path) -> None:
 # main
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Test-Time Augmentation (TTA)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Набор TTA-трансформаций: оригинал + горизонтальный флип + вертикальный флип
+# + небольшие вариации яркости. Применяются ПОСЛЕ resize, ДО нормализации.
+_TTA_AUGMENTS = [
+    lambda img: img,                                       # оригинал
+    lambda img: img.transpose(Image.FLIP_LEFT_RIGHT),      # горизонтальный флип
+    lambda img: img.transpose(Image.FLIP_TOP_BOTTOM),      # вертикальный флип (поворот 180°)
+    lambda img: img.point(lambda p: min(255, int(p * 1.1))),  # +10% яркость
+    lambda img: img.point(lambda p: max(0, int(p * 0.9))),    # -10% яркость
+]
+
+
+def _tta_probs(tile_img: Image.Image, tensor_tfm, model, n_aug: int) -> np.ndarray:
+    """Запускает n_aug аугментаций tile_img и возвращает усреднённый softmax."""
+    augs = _TTA_AUGMENTS[:n_aug]
+    all_probs = []
+    with torch.no_grad():
+        for aug_fn in augs:
+            t = tensor_tfm(aug_fn(tile_img)).unsqueeze(0).to(DEVICE)
+            p = F.softmax(model(t), dim=1).squeeze(0).cpu().numpy()
+            all_probs.append(p)
+    return np.mean(all_probs, axis=0)
+
+
+def _tta_probs_dual(tile_ds: Image.Image, tile_uv: Image.Image,
+                    tfm_ds, tfm_uv, model, n_aug: int) -> np.ndarray:
+    """TTA для dual-stream модели: синхронные аугментации обоих потоков."""
+    augs = _TTA_AUGMENTS[:n_aug]
+    all_probs = []
+    with torch.no_grad():
+        for aug_fn in augs:
+            t_ds = tfm_ds(aug_fn(tile_ds)).unsqueeze(0).to(DEVICE)
+            t_uv = tfm_uv(aug_fn(tile_uv)).unsqueeze(0).to(DEVICE)
+            p = F.softmax(model(t_ds, t_uv), dim=1).squeeze(0).cpu().numpy()
+            all_probs.append(p)
+    return np.mean(all_probs, axis=0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-well нормализация
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _compute_well_stats(well_dir: Path, modality: str, n_samples: int = 500) -> tuple:
+    """Вычисляет mean/std по тайлам одной скважины из dataset split-директорий."""
+    import random as _rnd
+    all_files = list(well_dir.rglob('*.jpg'))
+    _rnd.shuffle(all_files)
+    sample = all_files[:n_samples]
+    pixels = []
+    for p in sample:
+        try:
+            arr = np.array(Image.open(p).convert('RGB')) / 255.0
+            pixels.append(arr.reshape(-1, 3))
+        except Exception:
+            pass
+    if not pixels:
+        return [0.5, 0.5, 0.5], [0.2, 0.2, 0.2]
+    arr = np.concatenate(pixels, axis=0)
+    return arr.mean(axis=0).tolist(), arr.std(axis=0).tolist()
+
+
+def _make_well_transform(resize: str, mean: list, std: list):
+    from torchvision import transforms as _tfms
+    ops = [_tfms.Resize((224, 224)), _tfms.ToTensor(), _tfms.Normalize(mean, std)]
+    return _tfms.Compose(ops)
+
+
 def parse_args():
     p = argparse.ArgumentParser(
         description='Визуализация результатов ML-Core-Kern-',
@@ -527,11 +653,30 @@ def parse_args():
                    help='Кол-во скважин для per-well визуализации (0 = все тест-скважины, -1 = пропустить)')
     p.add_argument('--no-stats',  action='store_true', help='Пропустить confusion matrix и F1 графики')
     p.add_argument('--no-photos', action='store_true', help='Пропустить per-well визуализацию')
+    p.add_argument('--dataset-root', default=None, metavar='PATH',
+                   help='Переопределить DATASET_ROOT из config.py (для экспериментальных датасетов)')
+    p.add_argument('--tta', type=int, default=1, metavar='N',
+                   help='Test-Time Augmentation: усреднить N аугментаций (default: 1 = без TTA)')
+    p.add_argument('--per-well-norm', action='store_true',
+                   help='Нормализация по статистике конкретной скважины при инференсе')
     return p.parse_args()
 
 
 def main():
     args = parse_args()
+
+    if args.dataset_root:
+        import json as _json
+        _cfg.DATASET_ROOT  = Path(args.dataset_root)
+        _cfg.LABEL_ENCODER = _cfg.DATASET_ROOT / 'label_encoder.json'
+        _stats = _cfg.DATASET_ROOT / 'normalization_stats.json'
+        if _stats.exists():
+            with open(_stats) as _f:
+                _s = _json.load(_f)
+            _cfg.DS_MEAN = _s['ДС']['mean'];  _cfg.DS_STD = _s['ДС']['std']
+            _cfg.UV_MEAN = _s['УФ']['mean'];  _cfg.UV_STD = _s['УФ']['std']
+        print(f'Dataset: {_cfg.DATASET_ROOT}')
+
     run_dir   = _cfg.RESULTS_ROOT / args.run_name
     vis_dir   = run_dir / 'visual'
     stats_dir = vis_dir / 'stats'
@@ -633,7 +778,15 @@ def main():
         results = {}
 
         if args.dual:
-            labels, preds, probs, classes = collect_predictions_dual(dual_model, args.split)
+            if args.tta > 1 or args.per_well_norm:
+                suffix = []
+                if args.tta > 1: suffix.append(f'TTA×{args.tta}')
+                if args.per_well_norm: suffix.append('per-well-norm')
+                print(f'  [{", ".join(suffix)}]')
+            labels, preds, probs, classes = collect_predictions_dual(
+                dual_model, args.split,
+                n_tta=args.tta, per_well_norm=args.per_well_norm,
+            )
             f1  = f1_score(labels, preds, average='macro', zero_division=0)
             acc = accuracy_score(labels, preds)
             print(f'  Dual: F1={f1:.4f}  Acc={acc:.4f}  (n={len(labels)})')

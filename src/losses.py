@@ -32,6 +32,18 @@ class LabelSmoothingCE(nn.Module):
         return -(smooth * log_probs).sum(dim=1).mean()
 
 
+class SoftCrossEntropy(nn.Module):
+    """Кросс-энтропия с мягкими метками (распределением вместо int).
+
+    targets — float тензор (B, C) с вероятностями, сумма по dim=1 ≈ 1.
+    Совместима с CutMix: можно передавать lam*soft_a + (1-lam)*soft_b.
+    """
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        log_probs = F.log_softmax(logits, dim=1)
+        return -(targets * log_probs).sum(dim=1).mean()
+
+
 def get_criterion(
     loss_type: str = "ce",
     class_weights: Optional[torch.Tensor] = None,
@@ -41,4 +53,6 @@ def get_criterion(
         return FocalLoss(gamma=focal_gamma, weight=class_weights)
     if loss_type == "label_smooth":
         return LabelSmoothingCE(smoothing=0.1)
+    if loss_type == "soft_ce":
+        return SoftCrossEntropy()
     return nn.CrossEntropyLoss(weight=class_weights)

@@ -114,6 +114,55 @@ class PairedDataset(torch.utils.data.Dataset):
         return [s[2] for s in self.samples]
 
 
+class SoftLabelPairedDataset(torch.utils.data.Dataset):
+    """PairedDataset с мягкими метками (float вектор вместо int класса).
+
+    Читает soft_labels.json из dataset_root — маппинг {class_name: [p0, p1, ...]}
+    и base_classes.json — список базовых компонент.
+    Структура: dataset/{ДС|УФ}/{split}/{orig_class}/*.jpg
+    """
+
+    def __init__(
+        self,
+        ds_split_root: Path,
+        uv_split_root: Path,
+        ds_transform,
+        uv_transform,
+        soft_labels: dict,
+    ) -> None:
+        self.ds_transform = ds_transform
+        self.uv_transform = uv_transform
+        self.soft_labels = soft_labels
+
+        ds_cls = sorted(d.name for d in ds_split_root.iterdir() if d.is_dir())
+        uv_cls = sorted(d.name for d in uv_split_root.iterdir() if d.is_dir())
+        classes = sorted(set(ds_cls) & set(uv_cls) & set(soft_labels.keys()))
+        self.classes = classes
+
+        samples: list = []
+        for cls in classes:
+            ds_files = {f.name: f for f in (ds_split_root / cls).glob('*.jpg')}
+            uv_files = {f.name: f for f in (uv_split_root / cls).glob('*.jpg')}
+            soft_vec = torch.tensor(soft_labels[cls], dtype=torch.float32)
+            for name in sorted(set(ds_files) & set(uv_files)):
+                samples.append((ds_files[name], uv_files[name], soft_vec))
+        self.samples = samples
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int):
+        ds_path, uv_path, soft_label = self.samples[idx]
+        from PIL import Image as PILImage
+        img_ds = PILImage.open(ds_path).convert('RGB')
+        img_uv = PILImage.open(uv_path).convert('RGB')
+        return (self.ds_transform(img_ds), self.uv_transform(img_uv)), soft_label
+
+    @property
+    def targets(self) -> List[int]:
+        return [int(s[2].argmax().item()) for s in self.samples]
+
+
 def prepare_paired_loaders(
     dataset_root: Path,
     ds_train_tfm,

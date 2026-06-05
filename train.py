@@ -44,22 +44,39 @@ from config import (
 )
 from src.utils import set_seed
 from src.transforms import get_transforms
-from src.data import prepare_loaders, prepare_paired_loaders, PairedDataset
+from src.data import prepare_loaders, prepare_paired_loaders, PairedDataset, SoftLabelPairedDataset
 from src.models.resnet import create_resnet18, create_resnet50
 from src.models.dual_resnet import create_dual_resnet18, create_dual_resnet50
+from src.models.backbones import create_dual, create_single
 from src.training import EarlyStopping, save_history
 from src.losses import get_criterion
 from src.augmentation import cutmix_data, cutmix_data_paired
 
 
+def _make_arch_entry(arch: str, mode: str, batch_size: int, lr: float) -> dict:
+    """Создаёт запись реестра через универсальные backbones.py фабрики."""
+    if mode == 'single':
+        return dict(model_fn=lambda n, **kw: create_single(arch, n, **kw),
+                    batch_size=batch_size, lr=lr)
+    return dict(model_fn=lambda n, **kw: create_dual(arch, n, **kw),
+                batch_size=batch_size, lr=lr)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Реестр архитектур — добавить новую: вписать запись и model_fn в src/models/
+# Реестр архитектур — batch_size подобраны под 8GB VRAM
 # ─────────────────────────────────────────────────────────────────────────────
 ARCH_REGISTRY = {
-    ('resnet18', 'single'): dict(model_fn=create_resnet18,       batch_size=BATCH_SIZE,           lr=3e-4),
-    ('resnet18', 'dual'):   dict(model_fn=create_dual_resnet18,  batch_size=DUAL_BATCH_SIZE,      lr=DUAL_LR),
-    ('resnet50', 'single'): dict(model_fn=create_resnet50,       batch_size=RN50_BATCH_SIZE,      lr=RN50_LR),
-    ('resnet50', 'dual'):   dict(model_fn=create_dual_resnet50,  batch_size=RN50_DUAL_BATCH_SIZE, lr=RN50_LR),
+    # ResNet18/50 — старые factory-функции (совместимость с warm_start)
+    ('resnet18', 'single'): dict(model_fn=create_resnet18,      batch_size=BATCH_SIZE,           lr=3e-4),
+    ('resnet18', 'dual'):   dict(model_fn=create_dual_resnet18, batch_size=DUAL_BATCH_SIZE,      lr=DUAL_LR),
+    ('resnet50', 'single'): dict(model_fn=create_resnet50,      batch_size=RN50_BATCH_SIZE,      lr=RN50_LR),
+    ('resnet50', 'dual'):   dict(model_fn=create_dual_resnet50, batch_size=RN50_DUAL_BATCH_SIZE, lr=RN50_LR),
+    # EfficientNet-B3
+    ('efficientnet_b3', 'single'): _make_arch_entry('efficientnet_b3', 'single', 32, 2e-4),
+    ('efficientnet_b3', 'dual'):   _make_arch_entry('efficientnet_b3', 'dual',   16, 1e-4),
+    # ConvNeXt-Tiny
+    ('convnext_tiny', 'single'): _make_arch_entry('convnext_tiny', 'single', 32, 2e-4),
+    ('convnext_tiny', 'dual'):   _make_arch_entry('convnext_tiny', 'dual',   16, 1e-4),
 }
 
 
@@ -92,6 +109,35 @@ def make_dual_loaders(batch_size: int, gen=None):
     )
 
 
+def make_soft_dual_loaders(soft_labels: dict, batch_size: int, gen=None):
+    """Загрузчики для soft labels (dual режим). soft_labels: {class_name: [p0..p4]}"""
+    cfg_ds, cfg_uv = MODEL_CONFIGS['ДС'], MODEL_CONFIGS['УФ']
+
+    def _make(split, is_train):
+        ds = SoftLabelPairedDataset(
+            DATASET_ROOT / 'ДС' / split,
+            DATASET_ROOT / 'УФ' / split,
+            get_transforms(cfg_ds['resize'], cfg_ds['aug'] if is_train else 'none', is_train, DS_MEAN, DS_STD),
+            get_transforms(cfg_uv['resize'], cfg_uv['aug'] if is_train else 'none', is_train, UV_MEAN, UV_STD),
+            soft_labels,
+        )
+        return ds
+
+    train_ds = _make('train', True)
+    val_ds   = _make('val',   False)
+    classes  = list(train_ds.soft_labels.keys())  # оригинальные классы для информации
+
+    pin = torch.cuda.is_available()
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
+                              num_workers=NUM_WORKERS, pin_memory=pin,
+                              drop_last=True, persistent_workers=NUM_WORKERS > 0,
+                              generator=gen)
+    val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
+                              num_workers=NUM_WORKERS, pin_memory=pin,
+                              persistent_workers=NUM_WORKERS > 0)
+    return train_loader, val_loader, classes
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Загрузчики для inference после обучения (num_workers=0)
 # Работают даже если обучение было прервано Ctrl+C и воркеры убиты.
@@ -120,7 +166,7 @@ def make_dual_val_loader(batch_size: int):
 # ─────────────────────────────────────────────────────────────────────────────
 # Forward step (single / dual, CutMix только при training=True)
 # ─────────────────────────────────────────────────────────────────────────────
-def make_step_fn(model, mode: str, device, use_mix: bool):
+def make_step_fn(model, mode: str, device, use_mix: bool, soft: bool = False):
     if mode == 'single':
         _mix = cutmix_data if use_mix else None
         def step(batch, training=True):
@@ -131,6 +177,20 @@ def make_step_fn(model, mode: str, device, use_mix: bool):
             else:
                 y_a = y_b = labels; lam = 1.0
             return model(x), y_a, y_b, lam
+    elif soft:
+        # Dual-stream с мягкими метками. CutMix смешивает распределения линейно.
+        _mix = cutmix_data_paired if use_mix else None
+        def step(batch, training=True):
+            (x_ds, x_uv), soft_labels = batch
+            x_ds = x_ds.to(device)
+            x_uv = x_uv.to(device)
+            soft_labels = soft_labels.to(device)
+            if training and _mix:
+                x_ds, x_uv, y_a, y_b, lam = _mix(x_ds, x_uv, soft_labels)
+                # Смешиваем мягкие распределения — CutMix в пространстве меток
+                y_mixed = lam * y_a + (1.0 - lam) * y_b
+                return model(x_ds, x_uv), y_mixed, y_mixed, 1.0
+            return model(x_ds, x_uv), soft_labels, soft_labels, 1.0
     else:
         _mix = cutmix_data_paired if use_mix else None
         def step(batch, training=True):
@@ -173,7 +233,11 @@ def run_val_epoch(model, loader, step_fn, criterion, desc: str) -> dict:
             outputs, y_a, _, _ = step_fn(batch, training=False)
             total_loss += criterion(outputs, y_a).item() * y_a.size(0)
             all_preds.extend(torch.max(outputs, 1)[1].cpu().numpy())
-            all_labels.extend(y_a.cpu().numpy())
+            # Soft labels: y_a — (B, C) float, берём argmax как "истинный" класс
+            if y_a.dim() == 2:
+                all_labels.extend(y_a.argmax(dim=1).cpu().numpy())
+            else:
+                all_labels.extend(y_a.cpu().numpy())
     return {
         'loss': total_loss / len(loader.dataset),
         'f1':   f1_score(all_labels, all_preds, average='macro', zero_division=0),
@@ -190,7 +254,10 @@ def collect_preds(model, val_loader, step_fn):
         for batch in val_loader:
             outputs, y_a, _, _ = step_fn(batch, training=False)
             all_preds.extend(torch.max(outputs, 1)[1].cpu().numpy())
-            all_labels.extend(y_a.cpu().numpy())
+            if y_a.dim() == 2:
+                all_labels.extend(y_a.argmax(dim=1).cpu().numpy())
+            else:
+                all_labels.extend(y_a.cpu().numpy())
     return np.array(all_labels), np.array(all_preds)
 
 
@@ -198,7 +265,7 @@ def collect_preds(model, val_loader, step_fn):
 # Цикл обучения одной задачи
 # ─────────────────────────────────────────────────────────────────────────────
 def train_task(name: str, model, train_loader, val_loader,
-               lr: float, mode: str, device, run_dir: Path):
+               lr: float, mode: str, device, run_dir: Path, soft: bool = False):
     """Обучает модель, сохраняет лучший checkpoint. Возвращает history.
     Ctrl+C завершает эпоху, сохраняет историю и возвращает управление.
     """
@@ -208,20 +275,33 @@ def train_task(name: str, model, train_loader, val_loader,
     use_mix   = cfg.get('mix_aug', True)
     focal_g   = cfg.get('focal_gamma', 2.0)
 
-    counts        = torch.bincount(torch.tensor(train_loader.dataset.targets))
-    class_weights = (counts.sum() / (len(counts) * counts.float())).to(device)
-    criterion     = get_criterion(cfg.get('loss_type', 'focal'), class_weights, focal_gamma=focal_g)
+    if soft:
+        criterion = get_criterion('soft_ce')
+    else:
+        counts        = torch.bincount(torch.tensor(train_loader.dataset.targets))
+        class_weights = (counts.sum() / (len(counts) * counts.float())).to(device)
+        criterion     = get_criterion(cfg.get('loss_type', 'focal'), class_weights, focal_gamma=focal_g)
     optimizer     = optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
-    batch_sched   = optim.lr_scheduler.OneCycleLR(
-        optimizer, max_lr=lr, epochs=MAX_EPOCHS, steps_per_epoch=len(train_loader),
-        pct_start=WARMUP_EPOCHS / MAX_EPOCHS, div_factor=10.0, final_div_factor=1e4,
-    )
+    sched_type = cfg.get('scheduler', 'onecycle')
+    if sched_type == 'plateau':
+        # ReduceLROnPlateau — шаг после каждой эпохи по val_f1
+        epoch_sched = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='max', factor=0.5, patience=5, min_lr=1e-6,
+        )
+        batch_sched = None
+    else:
+        # OneCycleLR — шаг после каждого батча
+        epoch_sched = None
+        batch_sched = optim.lr_scheduler.OneCycleLR(
+            optimizer, max_lr=lr, epochs=MAX_EPOCHS, steps_per_epoch=len(train_loader),
+            pct_start=WARMUP_EPOCHS / MAX_EPOCHS, div_factor=10.0, final_div_factor=1e4,
+        )
     es      = EarlyStopping(patience=PATIENCE, min_delta=MIN_DELTA)
-    step_fn = make_step_fn(model, mode, device, use_mix)
+    step_fn = make_step_fn(model, mode, device, use_mix, soft=soft)
     ckpt    = run_dir / f'{name}_best.pth'
 
     print(f"\n{'='*60}")
-    print(f'  {name}  |  LR={lr:.0e}  WD={wd:.0e}  Batch={train_loader.batch_size}')
+    print(f'  {name}  |  LR={lr:.0e}  WD={wd:.0e}  Batch={train_loader.batch_size}  Sched={sched_type}')
     print(f'  Трейн: {len(train_loader.dataset):,}  |  Вал: {len(val_loader.dataset):,}')
     print(f"{'='*60}")
 
@@ -235,6 +315,9 @@ def train_task(name: str, model, train_loader, val_loader,
             val_mets = run_val_epoch(
                 model, val_loader, step_fn, criterion, f"Val   {epoch}/{MAX_EPOCHS}",
             )
+
+            if epoch_sched is not None:
+                epoch_sched.step(val_mets['f1'])
 
             if es.step(val_mets['f1'], epoch):
                 torch.save(model.state_dict(), ckpt)
@@ -399,14 +482,25 @@ def parse_args():
     )
     p.add_argument('run_name',
                    help='Имя папки в results/ (например: run_v5)')
-    p.add_argument('--arch', default='resnet18', choices=list({k[0] for k in ARCH_REGISTRY}),
-                   help='Backbone (default: resnet18)')
+    p.add_argument('--arch', default='resnet18',
+                   choices=sorted({k[0] for k in ARCH_REGISTRY}),
+                   help='Backbone: resnet18 | resnet50 | efficientnet_b3 | convnext_tiny (default: resnet18)')
     p.add_argument('--mode', default='single', choices=['single', 'dual'],
                    help='single — ДС+УФ независимо; dual — мультимодальный (default: single)')
     p.add_argument('--modality', default=None, choices=MODALITIES,
                    help='Обучать только одну модальность (только для --mode single)')
     p.add_argument('--warm-start', default=None, metavar='PATH',
                    help='Папка с ДС_best.pth и УФ_best.pth для тёплого старта (только --mode dual)')
+    p.add_argument('--dataset-root', default=None, metavar='PATH',
+                   help='Переопределить DATASET_ROOT из config.py (для экспериментальных датасетов)')
+    p.add_argument('--soft-labels', action='store_true',
+                   help='Использовать мягкие метки из dataset-root/soft_labels.json (только --mode dual)')
+    p.add_argument('--scheduler', default=None, choices=['onecycle', 'plateau'],
+                   help='Переопределить планировщик LR (default: из MODEL_CONFIGS или onecycle)')
+    p.add_argument('--max-epochs', type=int, default=None,
+                   help=f'Переопределить MAX_EPOCHS (default: {MAX_EPOCHS} из config.py)')
+    p.add_argument('--patience', type=int, default=None,
+                   help=f'Переопределить PATIENCE early stopping (default: {PATIENCE})')
     return p.parse_args()
 
 
@@ -415,8 +509,39 @@ def parse_args():
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
     args = parse_args()
+
+    # Опциональное переопределение датасета (для экспериментов)
+    if args.dataset_root:
+        global DATASET_ROOT, DS_MEAN, DS_STD, UV_MEAN, UV_STD
+        DATASET_ROOT = Path(args.dataset_root)
+        stats_file = DATASET_ROOT / 'normalization_stats.json'
+        if stats_file.exists():
+            with open(stats_file) as _f:
+                _s = json.load(_f)
+            DS_MEAN = _s['ДС']['mean']
+            DS_STD  = _s['ДС']['std']
+            UV_MEAN = _s['УФ']['mean']
+            UV_STD  = _s['УФ']['std']
+            print(f'Dataset : {DATASET_ROOT}  (нормализация из {stats_file.name})')
+        else:
+            print(f'Dataset : {DATASET_ROOT}  (normalization_stats.json не найден, используем config)')
+
     reg  = ARCH_REGISTRY[(args.arch, args.mode)]
     arch_label = f'{args.arch.capitalize()} {args.mode.capitalize()}'
+
+    # Переопределение гиперпараметров через CLI
+    if args.max_epochs:
+        global MAX_EPOCHS
+        MAX_EPOCHS = args.max_epochs
+    if args.patience:
+        global PATIENCE
+        PATIENCE = args.patience
+
+    if args.scheduler:
+        for k in MODEL_CONFIGS:
+            MODEL_CONFIGS[k]['scheduler'] = args.scheduler
+        # Для dual: вшиваем в специальный ключ
+        MODEL_CONFIGS.setdefault('dual', {})['scheduler'] = args.scheduler
 
     run_dir   = RESULTS_ROOT / args.run_name
     plots_dir = run_dir / 'plots'
@@ -456,8 +581,27 @@ def main():
     # ── Dual ──────────────────────────────────────────────────────────────────
     else:
         gen = set_seed(SEED)
-        train_ldr, val_ldr, classes = make_dual_loaders(reg['batch_size'], gen)
-        model = reg['model_fn'](len(classes), freeze_mode='none', dropout_p=0.5).to(DEVICE)
+
+        if args.soft_labels:
+            # Режим мягких меток: num_classes = число базовых компонент (5)
+            sl_path = DATASET_ROOT / 'soft_labels.json'
+            bc_path = DATASET_ROOT / 'base_classes.json'
+            if not sl_path.exists():
+                raise FileNotFoundError(f'Не найден {sl_path}. Создайте датасет: prepare_exp.py --mode soft')
+            with open(sl_path, encoding='utf-8') as _f:
+                soft_labels_map = json.load(_f)
+            with open(bc_path, encoding='utf-8') as _f:
+                base_classes = json.load(_f)
+            print(f'Soft labels: {len(soft_labels_map)} исходных классов → {len(base_classes)} базовых компонент')
+            print(f'Базовые: {base_classes}')
+            train_ldr, val_ldr, _ = make_soft_dual_loaders(soft_labels_map, reg['batch_size'], gen)
+            num_classes = len(base_classes)
+            classes = base_classes
+        else:
+            train_ldr, val_ldr, classes = make_dual_loaders(reg['batch_size'], gen)
+            num_classes = len(classes)
+
+        model = reg['model_fn'](num_classes, freeze_mode='none', dropout_p=0.5).to(DEVICE)
 
         if args.warm_start:
             ws = Path(args.warm_start)
@@ -471,6 +615,7 @@ def main():
         history = train_task(
             'dual', model, train_ldr, val_ldr,
             lr=reg['lr'], mode='dual', device=DEVICE, run_dir=run_dir,
+            soft=args.soft_labels,
         )
 
         result = generate_plots('dual', model, history, classes,

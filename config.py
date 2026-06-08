@@ -59,7 +59,7 @@ DUAL_LR         = 3e-4
 
 # ── ResNet50 (больше памяти → меньше батч) ────────────────────────────────────
 RN50_BATCH_SIZE      = 32   # single ResNet50 (2048 features vs 512 у RN18)
-RN50_DUAL_BATCH_SIZE = 24   # два ResNet50 backbone в памяти (4096 на fusion)
+RN50_DUAL_BATCH_SIZE = 16   # два ResNet50 backbone в памяти (4096 на fusion, RTX 3050)
 RN50_LR              = 3e-4
 
 # ── Нормализация: загружаем из файла если есть, иначе ImageNet ────────────────

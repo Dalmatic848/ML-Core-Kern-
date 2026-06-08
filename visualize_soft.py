@@ -123,9 +123,25 @@ def _mineral_color(mineral_key: str) -> str:
 # Загрузка модели и данных
 # ─────────────────────────────────────────────────────────────────────────────
 
-def load_model(results_dir: Path, num_classes: int = 5) -> DualStreamResNet18:
-    model = DualStreamResNet18(num_classes=num_classes)
+def load_model(results_dir: Path, num_classes: int = 5) -> torch.nn.Module:
+    """Загружает модель нужной архитектуры из config.json."""
+    cfg_path = results_dir / 'config.json'
+    arch = 'resnet18'
+    if cfg_path.exists():
+        with open(cfg_path) as f:
+            arch = json.load(f).get('arch', 'resnet18').replace('dual_', '')
+
     ckpt = torch.load(results_dir / 'dual_best.pth', map_location=DEVICE)
+
+    if arch in ('resnet50',):
+        from src.models.dual_resnet import create_dual_resnet50
+        model = create_dual_resnet50(num_classes, dropout_p=0.5)
+    elif arch in ('efficientnet_b3', 'efficientnet_b4', 'convnext_tiny', 'swin_t'):
+        from src.models.backbones import create_dual
+        model = create_dual(arch, num_classes, dropout_p=0.5)
+    else:
+        model = DualStreamResNet18(num_classes=num_classes)
+
     model.load_state_dict(ckpt)
     return model.to(DEVICE).eval()
 

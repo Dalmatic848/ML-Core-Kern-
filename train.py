@@ -71,12 +71,12 @@ ARCH_REGISTRY = {
     ('resnet18', 'dual'):   dict(model_fn=create_dual_resnet18, batch_size=DUAL_BATCH_SIZE,      lr=DUAL_LR),
     ('resnet50', 'single'): dict(model_fn=create_resnet50,      batch_size=RN50_BATCH_SIZE,      lr=RN50_LR),
     ('resnet50', 'dual'):   dict(model_fn=create_dual_resnet50, batch_size=RN50_DUAL_BATCH_SIZE, lr=RN50_LR),
-    # EfficientNet-B3
-    ('efficientnet_b3', 'single'): _make_arch_entry('efficientnet_b3', 'single', 32, 2e-4),
-    ('efficientnet_b3', 'dual'):   _make_arch_entry('efficientnet_b3', 'dual',   16, 1e-4),
-    # ConvNeXt-Tiny
-    ('convnext_tiny', 'single'): _make_arch_entry('convnext_tiny', 'single', 32, 2e-4),
-    ('convnext_tiny', 'dual'):   _make_arch_entry('convnext_tiny', 'dual',   16, 1e-4),
+    # EfficientNet-B3 — batch=8 dual (24.5M params × 2, RTX 3050 8GiB)
+    ('efficientnet_b3', 'single'): _make_arch_entry('efficientnet_b3', 'single', 24, 2e-4),
+    ('efficientnet_b3', 'dual'):   _make_arch_entry('efficientnet_b3', 'dual',    8, 1e-4),
+    # ConvNeXt-Tiny — batch=8 dual (56.8M params, самая тяжёлая)
+    ('convnext_tiny', 'single'): _make_arch_entry('convnext_tiny', 'single', 16, 2e-4),
+    ('convnext_tiny', 'dual'):   _make_arch_entry('convnext_tiny', 'dual',    8, 1e-4),
 }
 
 

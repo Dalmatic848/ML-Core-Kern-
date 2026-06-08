@@ -70,6 +70,9 @@ run_experiment() {
         return
     fi
 
+    # Очищаем GPU кэш перед следующим запуском
+    python3 -c "import torch; torch.cuda.empty_cache()" 2>/dev/null || true
+
     # Визуализация
     echo "  → visualize..."
     if eval "$vis_cmd" 2>&1 | tee "$log_vis" | \
@@ -94,6 +97,8 @@ run_experiment() {
 #   data/dataset_soft     → 30 минералов → 5 базовых компонент (soft labels)
 
 COMMON_TRAIN="--scheduler plateau --max-epochs 40 --patience 10"
+# Переменная среды снижает фрагментацию CUDA памяти
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 DATASET_6CLS="--dataset-root data/dataset_random"
 DATASET_SOFT="--dataset-root data/dataset_soft"
 

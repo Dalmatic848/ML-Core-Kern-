@@ -49,7 +49,7 @@ from src.models.resnet import create_resnet18, create_resnet50
 from src.models.dual_resnet import create_dual_resnet18, create_dual_resnet50
 from src.models.backbones import create_dual, create_single
 from src.training import EarlyStopping, save_history
-from src.losses import get_criterion
+from src.losses import get_criterion, mean_kl_divergence
 from src.augmentation import cutmix_data, cutmix_data_paired
 
 
@@ -227,24 +227,31 @@ def run_train_epoch(model, loader, step_fn, criterion, optimizer,
 
 def run_val_epoch(model, loader, step_fn, criterion, desc: str) -> dict:
     model.eval()
-    total_loss, all_preds, all_labels = 0.0, [], []
+    total_loss, total_kl, all_preds, all_labels = 0.0, 0.0, [], []
+    is_soft = False
     with torch.no_grad():
         for batch in tqdm(loader, desc=desc, leave=False):
             outputs, y_a, _, _ = step_fn(batch, training=False)
             total_loss += criterion(outputs, y_a).item() * y_a.size(0)
             all_preds.extend(torch.max(outputs, 1)[1].cpu().numpy())
-            # Soft labels: y_a — (B, C) float, берём argmax как "истинный" класс
             if y_a.dim() == 2:
+                is_soft = True
+                # KL только для soft — точная метрика качества состава
+                total_kl += mean_kl_divergence(outputs, y_a).item() * y_a.size(0)
                 all_labels.extend(y_a.argmax(dim=1).cpu().numpy())
             else:
                 all_labels.extend(y_a.cpu().numpy())
-    return {
-        'loss': total_loss / len(loader.dataset),
+    n = len(loader.dataset)
+    result = {
+        'loss': total_loss / n,
         'f1':   f1_score(all_labels, all_preds, average='macro', zero_division=0),
         'acc':  accuracy_score(all_labels, all_preds),
         'prec': precision_score(all_labels, all_preds, average='macro', zero_division=0),
         'rec':  recall_score(all_labels, all_preds, average='macro', zero_division=0),
     }
+    if is_soft:
+        result['kl'] = total_kl / n
+    return result
 
 
 def collect_preds(model, val_loader, step_fn):
@@ -316,17 +323,26 @@ def train_task(name: str, model, train_loader, val_loader,
                 model, val_loader, step_fn, criterion, f"Val   {epoch}/{MAX_EPOCHS}",
             )
 
-            if epoch_sched is not None:
-                epoch_sched.step(val_mets['f1'])
+            # Метрика для early stopping:
+            # soft режим → -KL (меньше KL = лучше, инвертируем для "больше = лучше")
+            # hard режим → F1 (больше = лучше)
+            if soft and 'kl' in val_mets:
+                es_metric = -val_mets['kl']
+            else:
+                es_metric = val_mets['f1']
 
-            if es.step(val_mets['f1'], epoch):
+            if epoch_sched is not None:
+                epoch_sched.step(es_metric)
+
+            if es.step(es_metric, epoch):
                 torch.save(model.state_dict(), ckpt)
 
             history.append({'epoch': epoch, 'train_loss': train_loss,
                             **{f'val_{k}': v for k, v in val_mets.items()}})
             cur_lr = optimizer.param_groups[0]['lr']
+            kl_str = f" | KL {val_mets['kl']:.3f}" if 'kl' in val_mets else ''
             print(f"Ep {epoch:3d} | TrL {train_loss:.4f} | VL {val_mets['loss']:.4f} | "
-                  f"F1 {val_mets['f1']:.4f} | Acc {val_mets['acc']:.4f} | "
+                  f"F1 {val_mets['f1']:.4f} | Acc {val_mets['acc']:.4f}{kl_str} | "
                   f"lr={cur_lr:.2e} | {es.status}")
 
             if es.should_stop:

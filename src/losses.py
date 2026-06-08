@@ -44,6 +44,18 @@ class SoftCrossEntropy(nn.Module):
         return -(targets * log_probs).sum(dim=1).mean()
 
 
+def mean_kl_divergence(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    """KL(targets || predicted) — среднее по батчу, в битах.
+
+    Чем меньше, тем точнее предсказан состав. 0 = идеал.
+    Используется как метрика качества (не для градиентов).
+    """
+    pred_probs = F.softmax(logits, dim=1).clamp(min=1e-9)
+    true_probs = targets.clamp(min=1e-9)
+    kl = (true_probs * (true_probs.log() - pred_probs.log())).sum(dim=1)
+    return kl.mean() / torch.log(torch.tensor(2.0))  # в битах
+
+
 def get_criterion(
     loss_type: str = "ce",
     class_weights: Optional[torch.Tensor] = None,

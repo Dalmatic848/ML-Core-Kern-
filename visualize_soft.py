@@ -23,25 +23,31 @@ import sys
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
 from sklearn.metrics import (
-    classification_report, confusion_matrix, ConfusionMatrixDisplay,
-    f1_score, precision_recall_fscore_support,
+    ConfusionMatrixDisplay,
+    classification_report,
+    confusion_matrix,
+    f1_score,
+    precision_recall_fscore_support,
 )
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent))
 import config as _cfg
-from src.transforms import get_transforms
 from src.data import SoftLabelPairedDataset
 from src.models.dual_resnet import DualStreamResNet18
+from src.taxonomy import MINERAL_TO_CLASS as MINERAL_TO_6CLASS
+from src.taxonomy import normalize_mineral_name as _csv_mineral_key
+from src.transforms import get_transforms
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -73,45 +79,12 @@ SIX_CLASS_COLORS = {
     'unknown':       '#94A3B8',
 }
 
-# ── 6-классовый маппинг (из prepare_exp.py, ключи с пробелами из CSV) ────────
-# Нормализация: CSV-имена с пробелами → ключи с подчёркиваниями
-def _csv_mineral_key(name: str) -> str:
-    """CSV: 'Глина аргиллитоподобная' → 'Глина_аргиллитоподобная'"""
-    return name.strip().replace(' ', '_')
-
-MINERAL_TO_6CLASS = {
-    'Аргиллит': 'Аргиллит', 'Аргиллит_углистый': 'Аргиллит',
-    'Аргиллит_с_включениями_угля': 'Аргиллит', 'Уголь': 'Аргиллит',
-    'Уголь_с_прослоями_аргиллита': 'Аргиллит',
-    'Алевролит': 'Алевролит', 'Алевролит_с_включениями_угля': 'Алевролит',
-    'Алевролит_глинистый': 'Алевролит', 'Алевролит_карбонатный': 'Алевролит',
-    'Глинисто-карбонатная_порода': 'Карбонат', 'Опока_глинистая': 'Карбонат',
-    'Глина_опоковидная': 'Карбонат',
-    'Глина_аргиллитоподобная_с_прослоями_глины_опоковидной': 'Карбонат',
-    'Кремнисто-глинистая_порода': 'Карбонат',
-    'Глина_опоковидная_с_включением_глинистых_опок': 'Карбонат',
-    'Глина_аргиллитоподобная': 'Карбонат',
-    'Переслаивание_песчаника,_аргиллита_и_алевролита': 'Перес_светлое',
-    'Песчаник_с_включениями_алевролита_и_аргиллита': 'Перес_светлое',
-    'Чередование_аргиллита,_алевролита_и_песчаника': 'Перес_светлое',
-    'Алевролит_с_прослоями_песчаника_и_аргиллита': 'Перес_светлое',
-    'Песчаник_с_прослоями_алевролита_и_аргиллита': 'Перес_светлое',
-    'Аргиллит_с_прослоями_песчаника_и_алевролита': 'Перес_светлое',
-    'Песчаник_с_прослоями_алевролита': 'Перес_светлое',
-    'Переслаивание_песчаника_и_алевролита': 'Перес_светлое',
-    'Алевролит_с_прослоями_песчаника': 'Перес_светлое',
-    'Песчаник_с_прослоями_аргиллита': 'Перес_светлое',
-    'Аргиллит_с_прослоями_песчаника': 'Перес_светлое',
-    'Переслаивание_песчаника_и_аргиллита': 'Перес_светлое',
-    'Переслаивание_аргиллита_и_алевролита': 'Перес_тёмное',
-    'Аргиллит_алевритовый': 'Перес_тёмное',
-    'Алевролит_с_прослоями_аргиллита': 'Перес_тёмное',
-    'Аргиллит_с_прослоями_алевролита': 'Перес_тёмное',
-    'Песчаник': 'Песчаник', 'Песчаник_карбонатный': 'Песчаник',
-}
+# 6-классовый маппинг и нормализация CSV-имён — единый источник: src/taxonomy.py
 
 # Уникальные цвета для оригинальных минералов в CSV (автоматически)
 import colorsys as _cs
+
+
 def _mineral_color(mineral_key: str) -> str:
     """Детерминированный цвет по хешу имени минерала."""
     h = abs(hash(mineral_key)) % 360 / 360.0
@@ -632,7 +605,7 @@ def visualize_core_column(well_name: str, model, tfm_ds, tfm_uv,
         # ── 6-класс маппинг ──────────────────────────────────────────────────
         mapped_markup = []
         for r in vis_markup:
-            cls6 = MINERAL_TO_6CLASS.get(r['key'], 'unknown')
+            cls6 = MINERAL_TO_6CLASS.get(r['key']) or 'unknown'
             mapped_markup.append({**r, 'mineral': cls6, 'key': cls6})
         _draw_markup_strip(axes[3], mapped_markup, z_top, z_bot,
                            colormap=SIX_CLASS_COLORS, title='6-классов\n(маппинг)',

@@ -49,7 +49,7 @@ step "Шаг 1/4: Подготовка данных"
 if [ -f "$SCRIPT_DIR/data/dataset/normalization_stats.json" ]; then
     echo "  Датасет уже готов — пропускаем"
 else
-    run "$PYTHON" "$SCRIPT_DIR/prepare_data.py"
+    run "$PYTHON" "$SCRIPT_DIR/prepare_dataset.py"
 fi
 
 # ── Шаг 2 и 3: Обучение ──────────────────────────────────────────────────────

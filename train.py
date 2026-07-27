@@ -12,45 +12,67 @@
 так что Ctrl+C завершает только текущий шаг и пайплайн продолжается.
 """
 
-import sys
 import argparse
+import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent))
 
 import json
+
 import matplotlib
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import numpy as np
 from sklearn.metrics import (
-    accuracy_score, f1_score, precision_score, recall_score,
-    confusion_matrix, ConfusionMatrixDisplay,
+    ConfusionMatrixDisplay,
+    accuracy_score,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
 )
 from torch.utils.data import DataLoader
 from torchvision import datasets as tv_datasets
 from tqdm import tqdm
 
 from config import (
-    DATASET_ROOT, RESULTS_ROOT, SEED,
-    BATCH_SIZE, DUAL_BATCH_SIZE, DUAL_LR,
-    MAX_EPOCHS, PATIENCE, MIN_DELTA, NUM_WORKERS, WARMUP_EPOCHS,
-    RN50_BATCH_SIZE, RN50_DUAL_BATCH_SIZE, RN50_LR,
-    MODEL_CONFIGS, MODALITIES, CLASS_PALETTE, CLASS_SHORT,
-    DS_MEAN, DS_STD, UV_MEAN, UV_STD,
+    BATCH_SIZE,
+    CLASS_PALETTE,
+    CLASS_SHORT,
+    DATASET_ROOT,
+    DS_MEAN,
+    DS_STD,
+    DUAL_BATCH_SIZE,
+    DUAL_LR,
+    MAX_EPOCHS,
+    MIN_DELTA,
+    MODALITIES,
+    MODEL_CONFIGS,
+    NUM_WORKERS,
+    PATIENCE,
+    RESULTS_ROOT,
+    RN50_BATCH_SIZE,
+    RN50_DUAL_BATCH_SIZE,
+    RN50_LR,
+    SEED,
+    UV_MEAN,
+    UV_STD,
+    WARMUP_EPOCHS,
 )
-from src.utils import set_seed
-from src.transforms import get_transforms
-from src.data import prepare_loaders, prepare_paired_loaders, PairedDataset, SoftLabelPairedDataset
-from src.models.resnet import create_resnet18, create_resnet50
-from src.models.dual_resnet import create_dual_resnet18, create_dual_resnet50
-from src.models.backbones import create_dual, create_single
-from src.training import EarlyStopping, save_history
-from src.losses import get_criterion, mean_kl_divergence
 from src.augmentation import cutmix_data, cutmix_data_paired
+from src.data import PairedDataset, SoftLabelPairedDataset, prepare_loaders, prepare_paired_loaders
+from src.losses import get_criterion, mean_kl_divergence
+from src.models.backbones import create_dual, create_single
+from src.models.dual_resnet import create_dual_resnet18, create_dual_resnet50
+from src.models.resnet import create_resnet18, create_resnet50
+from src.training import EarlyStopping, save_history
+from src.transforms import get_transforms
+from src.utils import set_seed
 
 
 def _make_arch_entry(arch: str, mode: str, batch_size: int, lr: float) -> dict:
@@ -567,7 +589,7 @@ def main():
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Device : {DEVICE}  |  Arch: {arch_label}  |  Run: {run_dir}')
     print(f'Batch  : {reg["batch_size"]}  |  Epochs: {MAX_EPOCHS}  |  Patience: {PATIENCE}')
-    print(f'Ctrl+C — остановить текущий шаг (графики всё равно будут построены)\n')
+    print('Ctrl+C — остановить текущий шаг (графики всё равно будут построены)\n')
 
     all_results: dict = {}
 
@@ -603,7 +625,7 @@ def main():
             sl_path = DATASET_ROOT / 'soft_labels.json'
             bc_path = DATASET_ROOT / 'base_classes.json'
             if not sl_path.exists():
-                raise FileNotFoundError(f'Не найден {sl_path}. Создайте датасет: prepare_exp.py --mode soft')
+                raise FileNotFoundError(f'Не найден {sl_path}. Создайте датасет: prepare_dataset.py --variant soft')
             with open(sl_path, encoding='utf-8') as _f:
                 soft_labels_map = json.load(_f)
             with open(bc_path, encoding='utf-8') as _f:

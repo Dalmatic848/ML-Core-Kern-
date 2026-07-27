@@ -1,0 +1,23 @@
+# ResNet50 с ReduceLROnPlateau — раньше RN50 запускали с OneCycleLR.
+name: 14_r50_plateau
+train_args:
+  - run_14_r50_plateau
+  - --mode
+  - dual
+  - --arch
+  - resnet50
+  - --dataset-root
+  - data/dataset_random
+  - --scheduler
+  - plateau
+  - --max-epochs
+  - "40"
+  - --patience
+  - "10"
+visualize_script: visualize_results.py
+visualize_args:
+  - run_14_r50_plateau
+  - --dual
+  - --dataset-root
+  - data/dataset_random
+  - --no-photos

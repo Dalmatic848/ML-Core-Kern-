@@ -1,0 +1,22 @@
+# Мощная модель + soft labels — финальный эксперимент в исходной ночной пачке.
+name: 17_r50_soft_plateau
+train_args:
+  - run_17_r50_soft_plateau
+  - --mode
+  - dual
+  - --arch
+  - resnet50
+  - --soft-labels
+  - --dataset-root
+  - data/dataset_soft
+  - --scheduler
+  - plateau
+  - --max-epochs
+  - "40"
+  - --patience
+  - "10"
+visualize_script: visualize_soft.py
+visualize_args:
+  - --run
+  - run_17_r50_soft_plateau
+  - --no-columns

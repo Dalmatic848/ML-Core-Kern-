@@ -44,7 +44,7 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent))
 import config as _cfg
 from src.data import SoftLabelPairedDataset
-from src.models.dual_resnet import DualStreamResNet18
+from src.models.registry import load_checkpoint
 from src.taxonomy import MINERAL_TO_CLASS as MINERAL_TO_6CLASS
 from src.taxonomy import normalize_mineral_name as _csv_mineral_key
 from src.transforms import get_transforms
@@ -97,26 +97,15 @@ def _mineral_color(mineral_key: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load_model(results_dir: Path, num_classes: int = 5) -> torch.nn.Module:
-    """Загружает модель нужной архитектуры из config.json."""
-    cfg_path = results_dir / 'config.json'
-    arch = 'resnet18'
-    if cfg_path.exists():
-        with open(cfg_path) as f:
-            arch = json.load(f).get('arch', 'resnet18').replace('dual_', '')
+    """Загружает dual-модель нужной архитектуры из config.json.
 
-    ckpt = torch.load(results_dir / 'dual_best.pth', map_location=DEVICE)
-
-    if arch in ('resnet50',):
-        from src.models.dual_resnet import create_dual_resnet50
-        model = create_dual_resnet50(num_classes, dropout_p=0.5)
-    elif arch in ('efficientnet_b3', 'efficientnet_b4', 'convnext_tiny', 'swin_t'):
-        from src.models.backbones import create_dual
-        model = create_dual(arch, num_classes, dropout_p=0.5)
-    else:
-        model = DualStreamResNet18(num_classes=num_classes)
-
-    model.load_state_dict(ckpt)
-    return model.to(DEVICE).eval()
+    num_classes оставлен параметром ради обратной совместимости вызовов, но
+    load_checkpoint() определяет реальное число классов ИЗ САМОГО checkpoint
+    и явно проверяет его на согласованность, если бы num_classes не совпал —
+    вместо невнятного PyTorch shape mismatch."""
+    return load_checkpoint(results_dir / 'dual_best.pth', mode='dual',
+                           run_dir=results_dir, expected_num_classes=num_classes,
+                           dropout_p=0.5, device=DEVICE)
 
 
 @torch.no_grad()

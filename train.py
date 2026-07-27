@@ -67,20 +67,16 @@ from config import (
 from src.augmentation import cutmix_data, cutmix_data_paired
 from src.data import PairedDataset, SoftLabelPairedDataset, prepare_loaders, prepare_paired_loaders
 from src.losses import get_criterion, mean_kl_divergence
-from src.models.backbones import create_dual, create_single
-from src.models.dual_resnet import create_dual_resnet18, create_dual_resnet50
-from src.models.resnet import create_resnet18, create_resnet50
+from src.models.registry import build_model
 from src.training import EarlyStopping, save_history
 from src.transforms import get_transforms
 from src.utils import set_seed
 
 
 def _make_arch_entry(arch: str, mode: str, batch_size: int, lr: float) -> dict:
-    """Создаёт запись реестра через универсальные backbones.py фабрики."""
-    if mode == 'single':
-        return dict(model_fn=lambda n, **kw: create_single(arch, n, **kw),
-                    batch_size=batch_size, lr=lr)
-    return dict(model_fn=lambda n, **kw: create_dual(arch, n, **kw),
+    """Создаёт запись реестра через src.models.registry.build_model — единая
+    точка arch-dispatch, используемая и в train.py, и в visualize_*.py."""
+    return dict(model_fn=lambda n, **kw: build_model(arch, mode, n, **kw),
                 batch_size=batch_size, lr=lr)
 
 
@@ -88,11 +84,10 @@ def _make_arch_entry(arch: str, mode: str, batch_size: int, lr: float) -> dict:
 # Реестр архитектур — batch_size подобраны под 8GB VRAM
 # ─────────────────────────────────────────────────────────────────────────────
 ARCH_REGISTRY = {
-    # ResNet18/50 — старые factory-функции (совместимость с warm_start)
-    ('resnet18', 'single'): dict(model_fn=create_resnet18,      batch_size=BATCH_SIZE,           lr=3e-4),
-    ('resnet18', 'dual'):   dict(model_fn=create_dual_resnet18, batch_size=DUAL_BATCH_SIZE,      lr=DUAL_LR),
-    ('resnet50', 'single'): dict(model_fn=create_resnet50,      batch_size=RN50_BATCH_SIZE,      lr=RN50_LR),
-    ('resnet50', 'dual'):   dict(model_fn=create_dual_resnet50, batch_size=RN50_DUAL_BATCH_SIZE, lr=RN50_LR),
+    ('resnet18', 'single'): _make_arch_entry('resnet18', 'single', BATCH_SIZE,      3e-4),
+    ('resnet18', 'dual'):   _make_arch_entry('resnet18', 'dual',   DUAL_BATCH_SIZE, DUAL_LR),
+    ('resnet50', 'single'): _make_arch_entry('resnet50', 'single', RN50_BATCH_SIZE,      RN50_LR),
+    ('resnet50', 'dual'):   _make_arch_entry('resnet50', 'dual',   RN50_DUAL_BATCH_SIZE, RN50_LR),
     # EfficientNet-B3 — batch=8 dual (24.5M params × 2, RTX 3050 8GiB)
     ('efficientnet_b3', 'single'): _make_arch_entry('efficientnet_b3', 'single', 24, 2e-4),
     ('efficientnet_b3', 'dual'):   _make_arch_entry('efficientnet_b3', 'dual',    8, 1e-4),

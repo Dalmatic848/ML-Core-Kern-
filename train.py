@@ -12,53 +12,58 @@
 так что Ctrl+C завершает только текущий шаг и пайплайн продолжается.
 """
 
-import sys
 import argparse
+import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent))
 
 import json
+
 import matplotlib
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-
 import torch
-import torch.nn as nn
-import torch.optim as optim
-import numpy as np
-from sklearn.metrics import (
-    accuracy_score, f1_score, precision_score, recall_score,
-    confusion_matrix, ConfusionMatrixDisplay,
-)
+from sklearn.metrics import ConfusionMatrixDisplay, confusion_matrix, f1_score
 from torch.utils.data import DataLoader
 from torchvision import datasets as tv_datasets
-from tqdm import tqdm
 
 from config import (
-    DATASET_ROOT, RESULTS_ROOT, SEED,
-    BATCH_SIZE, DUAL_BATCH_SIZE, DUAL_LR,
-    MAX_EPOCHS, PATIENCE, MIN_DELTA, NUM_WORKERS, WARMUP_EPOCHS,
-    RN50_BATCH_SIZE, RN50_DUAL_BATCH_SIZE, RN50_LR,
-    MODEL_CONFIGS, MODALITIES, CLASS_PALETTE, CLASS_SHORT,
-    DS_MEAN, DS_STD, UV_MEAN, UV_STD,
+    BATCH_SIZE,
+    CLASS_PALETTE,
+    CLASS_SHORT,
+    DATASET_ROOT,
+    DS_MEAN,
+    DS_STD,
+    DUAL_BATCH_SIZE,
+    DUAL_LR,
+    MAX_EPOCHS,
+    MIN_DELTA,
+    MODALITIES,
+    MODEL_CONFIGS,
+    NUM_WORKERS,
+    PATIENCE,
+    RESULTS_ROOT,
+    RN50_BATCH_SIZE,
+    RN50_DUAL_BATCH_SIZE,
+    RN50_LR,
+    SEED,
+    UV_MEAN,
+    UV_STD,
+    WARMUP_EPOCHS,
 )
-from src.utils import set_seed
+from src.data import PairedDataset, SoftLabelPairedDataset, prepare_loaders, prepare_paired_loaders
+from src.models.registry import build_model
+from src.training import collect_preds, make_step_fn, train_task
 from src.transforms import get_transforms
-from src.data import prepare_loaders, prepare_paired_loaders, PairedDataset, SoftLabelPairedDataset
-from src.models.resnet import create_resnet18, create_resnet50
-from src.models.dual_resnet import create_dual_resnet18, create_dual_resnet50
-from src.models.backbones import create_dual, create_single
-from src.training import EarlyStopping, save_history
-from src.losses import get_criterion, mean_kl_divergence
-from src.augmentation import cutmix_data, cutmix_data_paired
+from src.utils import set_seed
 
 
 def _make_arch_entry(arch: str, mode: str, batch_size: int, lr: float) -> dict:
-    """Создаёт запись реестра через универсальные backbones.py фабрики."""
-    if mode == 'single':
-        return dict(model_fn=lambda n, **kw: create_single(arch, n, **kw),
-                    batch_size=batch_size, lr=lr)
-    return dict(model_fn=lambda n, **kw: create_dual(arch, n, **kw),
+    """Создаёт запись реестра через src.models.registry.build_model — единая
+    точка arch-dispatch, используемая и в train.py, и в visualize_*.py."""
+    return dict(model_fn=lambda n, **kw: build_model(arch, mode, n, **kw),
                 batch_size=batch_size, lr=lr)
 
 
@@ -66,11 +71,10 @@ def _make_arch_entry(arch: str, mode: str, batch_size: int, lr: float) -> dict:
 # Реестр архитектур — batch_size подобраны под 8GB VRAM
 # ─────────────────────────────────────────────────────────────────────────────
 ARCH_REGISTRY = {
-    # ResNet18/50 — старые factory-функции (совместимость с warm_start)
-    ('resnet18', 'single'): dict(model_fn=create_resnet18,      batch_size=BATCH_SIZE,           lr=3e-4),
-    ('resnet18', 'dual'):   dict(model_fn=create_dual_resnet18, batch_size=DUAL_BATCH_SIZE,      lr=DUAL_LR),
-    ('resnet50', 'single'): dict(model_fn=create_resnet50,      batch_size=RN50_BATCH_SIZE,      lr=RN50_LR),
-    ('resnet50', 'dual'):   dict(model_fn=create_dual_resnet50, batch_size=RN50_DUAL_BATCH_SIZE, lr=RN50_LR),
+    ('resnet18', 'single'): _make_arch_entry('resnet18', 'single', BATCH_SIZE,      3e-4),
+    ('resnet18', 'dual'):   _make_arch_entry('resnet18', 'dual',   DUAL_BATCH_SIZE, DUAL_LR),
+    ('resnet50', 'single'): _make_arch_entry('resnet50', 'single', RN50_BATCH_SIZE,      RN50_LR),
+    ('resnet50', 'dual'):   _make_arch_entry('resnet50', 'dual',   RN50_DUAL_BATCH_SIZE, RN50_LR),
     # EfficientNet-B3 — batch=8 dual (24.5M params × 2, RTX 3050 8GiB)
     ('efficientnet_b3', 'single'): _make_arch_entry('efficientnet_b3', 'single', 24, 2e-4),
     ('efficientnet_b3', 'dual'):   _make_arch_entry('efficientnet_b3', 'dual',    8, 1e-4),
@@ -163,199 +167,6 @@ def make_dual_val_loader(batch_size: int):
     return DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=0), ds.classes
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Forward step (single / dual, CutMix только при training=True)
-# ─────────────────────────────────────────────────────────────────────────────
-def make_step_fn(model, mode: str, device, use_mix: bool, soft: bool = False):
-    if mode == 'single':
-        _mix = cutmix_data if use_mix else None
-        def step(batch, training=True):
-            x, labels = batch
-            x, labels = x.to(device), labels.to(device)
-            if training and _mix:
-                x, y_a, y_b, lam = _mix(x, labels)
-            else:
-                y_a = y_b = labels; lam = 1.0
-            return model(x), y_a, y_b, lam
-    elif soft:
-        # Dual-stream с мягкими метками. CutMix смешивает распределения линейно.
-        _mix = cutmix_data_paired if use_mix else None
-        def step(batch, training=True):
-            (x_ds, x_uv), soft_labels = batch
-            x_ds = x_ds.to(device)
-            x_uv = x_uv.to(device)
-            soft_labels = soft_labels.to(device)
-            if training and _mix:
-                x_ds, x_uv, y_a, y_b, lam = _mix(x_ds, x_uv, soft_labels)
-                # Смешиваем мягкие распределения — CutMix в пространстве меток
-                y_mixed = lam * y_a + (1.0 - lam) * y_b
-                return model(x_ds, x_uv), y_mixed, y_mixed, 1.0
-            return model(x_ds, x_uv), soft_labels, soft_labels, 1.0
-    else:
-        _mix = cutmix_data_paired if use_mix else None
-        def step(batch, training=True):
-            (x_ds, x_uv), labels = batch
-            x_ds, x_uv, labels = x_ds.to(device), x_uv.to(device), labels.to(device)
-            if training and _mix:
-                x_ds, x_uv, y_a, y_b, lam = _mix(x_ds, x_uv, labels)
-            else:
-                y_a = y_b = labels; lam = 1.0
-            return model(x_ds, x_uv), y_a, y_b, lam
-    return step
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Обучение / валидация
-# ─────────────────────────────────────────────────────────────────────────────
-def run_train_epoch(model, loader, step_fn, criterion, optimizer,
-                    clip_grad: float, batch_sched, desc: str) -> float:
-    model.train()
-    total_loss = 0.0
-    for batch in tqdm(loader, desc=desc, leave=False):
-        outputs, y_a, y_b, lam = step_fn(batch, training=True)
-        optimizer.zero_grad()
-        loss = lam * criterion(outputs, y_a) + (1 - lam) * criterion(outputs, y_b)
-        loss.backward()
-        if clip_grad > 0:
-            nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
-        optimizer.step()
-        if batch_sched:
-            batch_sched.step()
-        total_loss += loss.item() * y_a.size(0)
-    return total_loss / len(loader.dataset)
-
-
-def run_val_epoch(model, loader, step_fn, criterion, desc: str) -> dict:
-    model.eval()
-    total_loss, total_kl, all_preds, all_labels = 0.0, 0.0, [], []
-    is_soft = False
-    with torch.no_grad():
-        for batch in tqdm(loader, desc=desc, leave=False):
-            outputs, y_a, _, _ = step_fn(batch, training=False)
-            total_loss += criterion(outputs, y_a).item() * y_a.size(0)
-            all_preds.extend(torch.max(outputs, 1)[1].cpu().numpy())
-            if y_a.dim() == 2:
-                is_soft = True
-                # KL только для soft — точная метрика качества состава
-                total_kl += mean_kl_divergence(outputs, y_a).item() * y_a.size(0)
-                all_labels.extend(y_a.argmax(dim=1).cpu().numpy())
-            else:
-                all_labels.extend(y_a.cpu().numpy())
-    n = len(loader.dataset)
-    result = {
-        'loss': total_loss / n,
-        'f1':   f1_score(all_labels, all_preds, average='macro', zero_division=0),
-        'acc':  accuracy_score(all_labels, all_preds),
-        'prec': precision_score(all_labels, all_preds, average='macro', zero_division=0),
-        'rec':  recall_score(all_labels, all_preds, average='macro', zero_division=0),
-    }
-    if is_soft:
-        result['kl'] = total_kl / n
-    return result
-
-
-def collect_preds(model, val_loader, step_fn):
-    model.eval()
-    all_preds, all_labels = [], []
-    with torch.no_grad():
-        for batch in val_loader:
-            outputs, y_a, _, _ = step_fn(batch, training=False)
-            all_preds.extend(torch.max(outputs, 1)[1].cpu().numpy())
-            if y_a.dim() == 2:
-                all_labels.extend(y_a.argmax(dim=1).cpu().numpy())
-            else:
-                all_labels.extend(y_a.cpu().numpy())
-    return np.array(all_labels), np.array(all_preds)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Цикл обучения одной задачи
-# ─────────────────────────────────────────────────────────────────────────────
-def train_task(name: str, model, train_loader, val_loader,
-               lr: float, mode: str, device, run_dir: Path, soft: bool = False):
-    """Обучает модель, сохраняет лучший checkpoint. Возвращает history.
-    Ctrl+C завершает эпоху, сохраняет историю и возвращает управление.
-    """
-    cfg       = MODEL_CONFIGS.get(name, {})
-    wd        = cfg.get('wd', 1e-4)
-    clip_grad = cfg.get('clip_grad', 1.0)
-    use_mix   = cfg.get('mix_aug', True)
-    focal_g   = cfg.get('focal_gamma', 2.0)
-
-    if soft:
-        criterion = get_criterion('soft_ce')
-    else:
-        counts        = torch.bincount(torch.tensor(train_loader.dataset.targets))
-        class_weights = (counts.sum() / (len(counts) * counts.float())).to(device)
-        criterion     = get_criterion(cfg.get('loss_type', 'focal'), class_weights, focal_gamma=focal_g)
-    optimizer     = optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
-    sched_type = cfg.get('scheduler', 'onecycle')
-    if sched_type == 'plateau':
-        # ReduceLROnPlateau — шаг после каждой эпохи по val_f1
-        epoch_sched = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='max', factor=0.5, patience=5, min_lr=1e-6,
-        )
-        batch_sched = None
-    else:
-        # OneCycleLR — шаг после каждого батча
-        epoch_sched = None
-        batch_sched = optim.lr_scheduler.OneCycleLR(
-            optimizer, max_lr=lr, epochs=MAX_EPOCHS, steps_per_epoch=len(train_loader),
-            pct_start=WARMUP_EPOCHS / MAX_EPOCHS, div_factor=10.0, final_div_factor=1e4,
-        )
-    es      = EarlyStopping(patience=PATIENCE, min_delta=MIN_DELTA)
-    step_fn = make_step_fn(model, mode, device, use_mix, soft=soft)
-    ckpt    = run_dir / f'{name}_best.pth'
-
-    print(f"\n{'='*60}")
-    print(f'  {name}  |  LR={lr:.0e}  WD={wd:.0e}  Batch={train_loader.batch_size}  Sched={sched_type}')
-    print(f'  Трейн: {len(train_loader.dataset):,}  |  Вал: {len(val_loader.dataset):,}')
-    print(f"{'='*60}")
-
-    history = []
-    try:
-        for epoch in range(1, MAX_EPOCHS + 1):
-            train_loss = run_train_epoch(
-                model, train_loader, step_fn, criterion, optimizer,
-                clip_grad, batch_sched, f"Train {epoch}/{MAX_EPOCHS}",
-            )
-            val_mets = run_val_epoch(
-                model, val_loader, step_fn, criterion, f"Val   {epoch}/{MAX_EPOCHS}",
-            )
-
-            # Метрика для early stopping:
-            # soft режим → -KL (меньше KL = лучше, инвертируем для "больше = лучше")
-            # hard режим → F1 (больше = лучше)
-            if soft and 'kl' in val_mets:
-                es_metric = -val_mets['kl']
-            else:
-                es_metric = val_mets['f1']
-
-            if epoch_sched is not None:
-                epoch_sched.step(es_metric)
-
-            if es.step(es_metric, epoch):
-                torch.save(model.state_dict(), ckpt)
-
-            history.append({'epoch': epoch, 'train_loss': train_loss,
-                            **{f'val_{k}': v for k, v in val_mets.items()}})
-            cur_lr = optimizer.param_groups[0]['lr']
-            kl_str = f" | KL {val_mets['kl']:.3f}" if 'kl' in val_mets else ''
-            print(f"Ep {epoch:3d} | TrL {train_loss:.4f} | VL {val_mets['loss']:.4f} | "
-                  f"F1 {val_mets['f1']:.4f} | Acc {val_mets['acc']:.4f}{kl_str} | "
-                  f"lr={cur_lr:.2e} | {es.status}")
-
-            if es.should_stop:
-                print(f'\n  [early stop] Лучшая эпоха: {es.best_epoch}  F1={es.best:.4f}')
-                break
-
-    except KeyboardInterrupt:
-        print(f'\n  [Ctrl+C] Остановлено на эпохе {len(history)}. '
-              f'Лучшая: ep{es.best_epoch}  F1={es.best:.4f}')
-
-    save_history(history, run_dir / f'{name}_history.json')
-    torch.cuda.empty_cache()
-    return history
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -368,7 +179,8 @@ def _plot_curves(name: str, hist: list, arch_label: str, save_path: Path):
     fig, axes = plt.subplots(1, 3, figsize=(15, 4))
     axes[0].plot(epochs, [h['train_loss'] for h in hist], label='Train')
     axes[0].plot(epochs, [h['val_loss']   for h in hist], label='Val')
-    axes[0].set_title(f'{name} — Loss'); axes[0].legend()
+    axes[0].set_title(f'{name} — Loss')
+    axes[0].legend()
     best = max(hist, key=lambda h: h['val_f1'])
     axes[1].plot(epochs, [h['val_f1'] for h in hist], color='tab:green')
     axes[1].axvline(best['epoch'], color='gray', linestyle='--', alpha=0.6)
@@ -376,7 +188,8 @@ def _plot_curves(name: str, hist: list, arch_label: str, save_path: Path):
     axes[2].plot(epochs, [h['val_acc']  for h in hist], label='Acc')
     axes[2].plot(epochs, [h['val_prec'] for h in hist], label='Prec')
     axes[2].plot(epochs, [h['val_rec']  for h in hist], label='Rec')
-    axes[2].set_title(f'{name} — Val metrics'); axes[2].legend()
+    axes[2].set_title(f'{name} — Val metrics')
+    axes[2].legend()
     for ax in axes:
         ax.set_xlabel('Epoch')
     plt.suptitle(f'Кривые обучения — {name} ({arch_label})', fontsize=12)
@@ -410,7 +223,9 @@ def _plot_per_class_f1(labels, preds, classes: list, title: str, save_path: Path
                 f'{v:.2f}', ha='center', va='bottom', fontsize=9)
     ax.axhline(f1_per.mean(), color='gray', linestyle='--', linewidth=1,
                label=f'macro = {f1_per.mean():.2f}')
-    ax.set_ylim(0, 1.05); ax.tick_params(axis='x', rotation=35); ax.legend()
+    ax.set_ylim(0, 1.05)
+    ax.tick_params(axis='x', rotation=35)
+    ax.legend()
     ax.set_title(title)
     for sp in ['top', 'right']:
         ax.spines[sp].set_visible(False)
@@ -436,10 +251,13 @@ def _plot_summary(results: dict, run_name: str, arch_label: str,
         colLabels=['Модель', 'F1 macro', 'Accuracy', 'Precision', 'Recall', 'Лучшая эпоха'],
         cellLoc='center', loc='center',
     )
-    tbl.auto_set_font_size(False); tbl.set_fontsize(11); tbl.scale(1.0, 2.0)
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(11)
+    tbl.scale(1.0, 2.0)
     for (r, c), cell in tbl.get_celld().items():
         if r == 0:
-            cell.set_facecolor('#1E3A5F'); cell.set_text_props(color='white', fontweight='bold')
+            cell.set_facecolor('#1E3A5F')
+            cell.set_text_props(color='white', fontweight='bold')
         elif r % 2:
             cell.set_facecolor('#EFF6FF')
         else:
@@ -567,7 +385,7 @@ def main():
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Device : {DEVICE}  |  Arch: {arch_label}  |  Run: {run_dir}')
     print(f'Batch  : {reg["batch_size"]}  |  Epochs: {MAX_EPOCHS}  |  Patience: {PATIENCE}')
-    print(f'Ctrl+C — остановить текущий шаг (графики всё равно будут построены)\n')
+    print('Ctrl+C — остановить текущий шаг (графики всё равно будут построены)\n')
 
     all_results: dict = {}
 
@@ -583,6 +401,8 @@ def main():
                 mod, model, train_ldr, val_ldr,
                 lr=MODEL_CONFIGS[mod].get('lr', reg['lr']),
                 mode='single', device=DEVICE, run_dir=run_dir,
+                model_configs=MODEL_CONFIGS, max_epochs=MAX_EPOCHS,
+                patience=PATIENCE, min_delta=MIN_DELTA, warmup_epochs=WARMUP_EPOCHS,
             )
 
             # Графики через свежий загрузчик (num_workers=0) — работает после Ctrl+C
@@ -603,7 +423,7 @@ def main():
             sl_path = DATASET_ROOT / 'soft_labels.json'
             bc_path = DATASET_ROOT / 'base_classes.json'
             if not sl_path.exists():
-                raise FileNotFoundError(f'Не найден {sl_path}. Создайте датасет: prepare_exp.py --mode soft')
+                raise FileNotFoundError(f'Не найден {sl_path}. Создайте датасет: prepare_dataset.py --variant soft')
             with open(sl_path, encoding='utf-8') as _f:
                 soft_labels_map = json.load(_f)
             with open(bc_path, encoding='utf-8') as _f:
@@ -632,6 +452,8 @@ def main():
             'dual', model, train_ldr, val_ldr,
             lr=reg['lr'], mode='dual', device=DEVICE, run_dir=run_dir,
             soft=args.soft_labels,
+            model_configs=MODEL_CONFIGS, max_epochs=MAX_EPOCHS,
+            patience=PATIENCE, min_delta=MIN_DELTA, warmup_epochs=WARMUP_EPOCHS,
         )
 
         result = generate_plots('dual', model, history, classes,

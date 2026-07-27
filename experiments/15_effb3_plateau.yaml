@@ -1,0 +1,23 @@
+# EfficientNet-B3 (24.5M) — часто лучше RN50 на ограниченных данных.
+name: 15_effb3_plateau
+train_args:
+  - run_15_effb3_plateau
+  - --mode
+  - dual
+  - --arch
+  - efficientnet_b3
+  - --dataset-root
+  - data/dataset_random
+  - --scheduler
+  - plateau
+  - --max-epochs
+  - "40"
+  - --patience
+  - "10"
+visualize_script: visualize_results.py
+visualize_args:
+  - run_15_effb3_plateau
+  - --dual
+  - --dataset-root
+  - data/dataset_random
+  - --no-photos

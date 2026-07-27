@@ -1,0 +1,21 @@
+# Проверяем soft labels + ReduceLROnPlateau вместе — оба улучшения из одной
+# итерации разработки (см. docs/ANALYSIS.md / README.md, run 13).
+name: 13_r18_soft_plateau
+train_args:
+  - run_13_r18_soft_plateau
+  - --mode
+  - dual
+  - --soft-labels
+  - --dataset-root
+  - data/dataset_soft
+  - --scheduler
+  - plateau
+  - --max-epochs
+  - "40"
+  - --patience
+  - "10"
+visualize_script: visualize_soft.py
+visualize_args:
+  - --run
+  - run_13_r18_soft_plateau
+  - --no-columns

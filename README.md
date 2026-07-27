@@ -1,6 +1,6 @@
 # ML-Core-Kern — Литотипизация керна
 
-Классификация литотипов горных пород по фотографиям бурового керна.  
+Классификация литотипов горных пород по фотографиям бурового керна.
 Две модальности: **ДС** (дневной свет) и **УФ** (ультрафиолет), тайлы 10 см.
 
 ---
@@ -34,9 +34,13 @@
 
 ### Soft Labels таксономия (5 базовых компонент)
 
-Альтернативный подход: каждый исходный минерал → вектор состава `[Пес, Алев, Арг, Карб, Гл_оп]`.  
-Пример: `Алевролит_с_прослоями_песчаника` → `[0.25, 0.75, 0, 0, 0]`.  
-Подробнее: `prepare_exp.py --mode soft`.
+Альтернативный подход: каждый исходный минерал → вектор состава `[Пес, Алев, Арг, Карб, Гл_оп]`.
+Пример: `Алевролит_с_прослоями_песчаника` → `[0.25, 0.75, 0, 0, 0]`.
+Подробнее: `prepare_dataset.py --variant soft`.
+
+Оба уровня таксономии (6 классов и soft-компоненты) определены в **одном
+месте** — `src/taxonomy.py` — и проверяются на согласованность тестами
+(`tests/test_taxonomy.py`) и pre-commit хуком.
 
 ---
 
@@ -57,40 +61,69 @@
 ```
 ML-Core-Kern-/
 ├── config.py                    # Пути, гиперпараметры, цвета
-├── train.py                     # Единый скрипт обучения
+├── prepare_dataset.py           # Единый пайплайн подготовки данных (тайлинг + все варианты датасета)
+├── train.py                     # Тонкий CLI обучения (аргументы, ARCH_REGISTRY, графики)
+├── predict.py                   # Инференс на одном тайле по promoted-модели (models/)
 ├── visualize_results.py         # Визуализация для 6-классовых моделей
 ├── visualize_soft.py            # Визуализация для soft-label моделей
-├── prepare_exp.py               # Сборка экспериментальных датасетов
-├── prepare_data.py              # Основной пайплайн (тайлинг, сплит)
-├── run_overnight.sh             # Ночной скрипт последовательного обучения
 ├── src/
-│   ├── models/
-│   │   ├── backbones.py         # EfficientNet, ConvNeXt, универсальный DualStreamModel
-│   │   ├── dual_resnet.py       # DualStreamResNet18/50
-│   │   └── resnet.py            # create_resnet18/50
+│   ├── taxonomy.py              # Единственный источник маппинга минерал→класс + soft-компоненты
+│   ├── training.py              # Цикл обучения, EarlyStopping, GracefulStop (STOP-файл/SIGUSR1)
 │   ├── data.py                  # PairedDataset, SoftLabelPairedDataset
 │   ├── losses.py                # FocalLoss, LabelSmoothingCE, SoftCrossEntropy
 │   ├── transforms.py            # get_transforms()
-│   └── training.py              # EarlyStopping, save_history
-├── data/
+│   └── models/
+│       ├── registry.py          # build_model/load_checkpoint — единая точка arch-dispatch
+│       ├── backbones.py         # EfficientNet, ConvNeXt, универсальный DualStreamModel
+│       └── resnet.py            # create_resnet18/50
+├── experiments/                 # Эксперименты как данные (*.yaml), см. scripts/run_batch.py
+├── scripts/
+│   ├── run_experiment.py        # Запускает один эксперимент, проверяет реальный код возврата
+│   ├── run_batch.py             # Пакетный прогон experiments/*.yaml (замена run_overnight.sh)
+│   └── validate_taxonomy.py     # Проверка src/taxonomy.py <-> soft_labels_config.json
+├── tests/                       # pytest, без GPU и без реальных данных (см. CI)
+├── docs/
+│   └── ANALYSIS.md              # Архивный снимок анализа (устарел, см. этот README)
+├── models/                      # Promoted-чекпоинты для инференса, см. models/README.md
+├── data/                        # Не версионируется (см. .gitignore)
 │   ├── dataset/                 # Основной датасет (well-based split)
 │   ├── dataset_random/          # Random interval split, 6 классов
-│   ├── dataset_soft/            # Soft labels, 30 минералов → 5 компонент
+│   ├── dataset_no_merge*/       # Оригинальные минералы без слияния
+│   ├── dataset_soft/            # Soft labels, ~30 минералов → 5 компонент
 │   └── pipeline/
 │       ├── tiles/               # Нарезанные тайлы по скважинам
 │       └── csv/                 # Разметка геолога (depth_from, depth_to, mineral)
-└── results/                     # Результаты экспериментов (run_01..run_17)
+└── results/                     # Результаты экспериментов (run_01..run_17) — не версионируется
 ```
+
+`results/` и `logs/` не версионируются (см. «Воспроизводимость» ниже), но
+`experiments/*.yaml` — версионируется, так что рецепт любого прогона всегда
+доступен из чистого клона, даже если сами метрики/чекпоинты — нет.
 
 ---
 
 ## Запуск
 
-### Обучение
+### Сборка датасета
 
 ```bash
 source ../venv/bin/activate
 
+# Канонический датасет с нуля (тайлинг + well-based split, 6 классов)
+python3 prepare_dataset.py --force
+
+# Пересобрать канонический датасет без повторного тайлинга
+python3 prepare_dataset.py --stages 3,4,5,6,7
+
+# Варианты поверх уже готовых тайлов
+python3 prepare_dataset.py --variant random
+python3 prepare_dataset.py --variant no-merge --min-tiles 300
+python3 prepare_dataset.py --variant soft
+```
+
+### Обучение
+
+```bash
 # Стандартное (RN18 dual, plateau планировщик, 6 классов)
 python3 train.py run_18_test --mode dual \
     --dataset-root data/dataset_random \
@@ -106,8 +139,12 @@ python3 train.py run_18_cnxt --mode dual --arch convnext_tiny \
     --dataset-root data/dataset_random \
     --scheduler plateau
 
-# Ночной скрипт (несколько экспериментов подряд)
-bash run_overnight.sh
+# Многочасовой прогон: Ctrl+C убивает DataLoader-воркеров. Мягкая
+# остановка между эпохами — touch /tmp/ml_STOP или kill -USR1 <pid>.
+
+# Пакетный прогон нескольких экспериментов (experiments/*.yaml)
+python3 scripts/run_batch.py
+python3 scripts/run_batch.py --only 13_r18_soft_plateau
 ```
 
 ### Визуализация
@@ -125,17 +162,11 @@ python3 visualize_results.py run_10_r18_plateau --dual \
     --dataset-root data/dataset_random --tta 5 --per-well-norm
 ```
 
-### Сборка датасета
+### Инференс на новом тайле
 
 ```bash
-# Пересборка random-split (6 классов)
-python3 prepare_exp.py --mode random
-
-# Soft labels датасет (порог 50 тайлов)
-python3 prepare_exp.py --mode soft --min-tiles 50
-
-# Исходный пайплайн (тайлинг 20 см вместо 10)
-python3 prepare_data.py --tile-cm 20 --force
+# Сначала промоутить лучшую модель — см. models/README.md
+python3 predict.py --model-dir models/production --image tile_ds.jpg --uv-image tile_uv.jpg
 ```
 
 ---
@@ -217,7 +248,7 @@ val F1=0.606 за **18 эпох** (RN18 plateau: 0.611 за 60 эпох). Схо
 ## Что ещё можно попробовать
 
 ### Данные
-- **Крупные тайлы 20–30 см**: `python3 prepare_data.py --tile-cm 20 --force` — переслаивание лучше видно на длинном фрагменте
+- **Крупные тайлы 20–30 см**: `python3 prepare_dataset.py --tile-cm 20 --force` — переслаивание лучше видно на длинном фрагменте
 - **Per-well нормализация**: вычислять mean/std из тайлов конкретной скважины при инференсе (`--per-well-norm`)
 - **Пересмотр таксономии**: выделить Глина_опоковидная как отдельный класс, убрать Алевролит или слить с Аргиллитом
 
@@ -251,19 +282,23 @@ val F1=0.606 за **18 эпох** (RN18 plateau: 0.611 за 60 эпох). Схо
 | v4 | 05.06.26 | Диагностика domain shift, random split, prepare_exp.py |
 | v5 | 05.06.26 | Soft labels, ReduceLROnPlateau, visualize_soft.py |
 | v6 | 08.06.26 | EfficientNet-B3, ConvNeXt-Tiny, run_overnight.sh, нумерация run_NN |
-=======
-# ML-Core-Kern
+| v7 | 27.07.26 | Чистка репозитория: единая таксономия (src/taxonomy.py), prepare_dataset.py вместо prepare_data.py/prepare_exp.py, единый model registry (src/models/registry.py, dual_resnet.py удалён), src/training.py + graceful stop, experiments/*.yaml + scripts/run_batch.py вместо run_overnight.sh, predict.py, тесты + CI |
 
-## Описание проекта
-Определение литотипов керна по фотографиям в естественном (ДС) и ультрафиолетовом (УФ) свете.
+---
 
-## Структура репозитория
-- `data/` – датасет 
-- `notebooks/` – исследовательские ноутбуки 
-- `src/` – переиспользуемый код: загрузка данных, модели, утилиты
-- `models/` – сохранённые веса обученных моделей 
-- `results/` – графики, таблицы с метриками
-- `reports/` – итоговые отчёты 
+## Разработка
 
-На данный момент последней идеей является two-models-v2, версии two-models-v1 и double-encoder являются неактулаьными.
+```bash
+python3 -m pip install -r requirements-dev.txt   # ruff, pytest, pre-commit
+ruff check .                                     # линт
+pytest                                           # тесты (без GPU, без данных)
+pre-commit install                               # хуки при коммите (опционально)
+```
 
+Полнота таксономии (src/taxonomy.py <-> soft_labels_config.json) проверяется
+отдельно тестами и pre-commit хуком — правки в маппинге минерал→класс,
+которые нарушают soft-label векторы, будут пойманы до коммита, а не после
+очередной путаницы 8-классовой/6-классовой таксономии (см. `docs/ANALYSIS.md`
+для истории того, как это уже случалось).
+
+Работа ведётся через pull request в `main` — см. `CONTRIBUTING.md`.

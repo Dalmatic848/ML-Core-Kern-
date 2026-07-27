@@ -18,7 +18,7 @@ ARCH="${2:-resnet18}"
 MODE="${3:-single}"
 WARM_START="${4:-}"
 
-PYTHON="$(dirname "$0")/venv/bin/python3"
+PYTHON="$(dirname "$0")/../venv/bin/python3"
 SCRIPT_DIR="$(dirname "$0")"
 
 # ── Родительский шелл игнорирует Ctrl+C ──────────────────────────────────────
@@ -49,7 +49,7 @@ step "Шаг 1/4: Подготовка данных"
 if [ -f "$SCRIPT_DIR/data/dataset/normalization_stats.json" ]; then
     echo "  Датасет уже готов — пропускаем"
 else
-    run "$PYTHON" "$SCRIPT_DIR/prepare_data.py"
+    run "$PYTHON" "$SCRIPT_DIR/prepare_dataset.py"
 fi
 
 # ── Шаг 2 и 3: Обучение ──────────────────────────────────────────────────────

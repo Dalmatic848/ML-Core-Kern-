@@ -15,94 +15,49 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 import matplotlib
+
 matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
 from PIL import Image
 from sklearn.metrics import (
-    accuracy_score, classification_report,
-    confusion_matrix, ConfusionMatrixDisplay,
-    f1_score, precision_recall_fscore_support,
+    ConfusionMatrixDisplay,
+    accuracy_score,
+    classification_report,
+    confusion_matrix,
+    f1_score,
+    precision_recall_fscore_support,
 )
 from torch.utils.data import DataLoader
 from torchvision import datasets as tv_datasets
 from tqdm import tqdm
 
 import config as _cfg
-from src.models.resnet import create_resnet18, create_resnet50
-from src.models.dual_resnet import (
-    create_dual_resnet18, DualStreamResNet18,
-    create_dual_resnet50, DualStreamResNet50,
-)
+from src.models.registry import infer_num_classes, load_checkpoint, read_arch_from_config
 from src.transforms import get_transforms
-from src.utils import set_seed
-
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 _DEPTH_RE = re.compile(r'_([\d]+[.,][\d]+)\s*-\s*([\d]+[.,][\d]+)$')
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Авто-определение num_classes из checkpoint
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _num_classes_from_state(state: dict, dual: bool = False) -> int:
-    key = 'head.4.weight' if dual else 'fc.1.weight'
-    if key in state:
-        return state[key].shape[0]
-    # Fallback: ищем последний Linear-слой (head или fc или classifier)
-    for k, v in reversed(list(state.items())):
-        if k.endswith('.weight') and v.dim() == 2:
-            if any(s in k for s in ('head.', 'fc.', 'classifier.')):
-                return v.shape[0]
-    raise ValueError(f'Не удалось определить num_classes из checkpoint. Ключи: {list(state)[:10]}')
-
-
-def _read_arch(run_dir: Path) -> str:
-    """Читает архитектуру из config.json; возвращает 'resnet18' если не указана."""
-    cfg_path = run_dir / 'config.json'
-    if cfg_path.exists():
-        with open(cfg_path, encoding='utf-8') as f:
-            return json.load(f).get('arch', 'resnet18')
-    return 'resnet18'
-
-
 def _load_single(pth: Path, modality: str, arch: str = 'resnet18') -> torch.nn.Module:
-    state = torch.load(pth, map_location=DEVICE, weights_only=True)
-    state = {k.replace('module.', '').replace('model.', ''): v for k, v in state.items()}
-    n   = _num_classes_from_state(state, dual=False)
     cfg = _cfg.MODEL_CONFIGS[modality]
-    if arch == 'resnet50':
-        model = create_resnet50(n, freeze_mode=cfg['freeze'], dropout_p=cfg['dropout'])
-    else:
-        model = create_resnet18(n, freeze_mode=cfg['freeze'], dropout_p=cfg['dropout'])
-    model.load_state_dict(state, strict=True)
-    return model.to(DEVICE).eval()
+    return load_checkpoint(pth, mode='single', arch=arch,
+                           freeze_mode=cfg['freeze'], dropout_p=cfg['dropout'], device=DEVICE)
 
 
 def _load_dual(pth: Path, arch: str = 'resnet18') -> torch.nn.Module:
-    state = torch.load(pth, map_location=DEVICE, weights_only=True)
-    n = _num_classes_from_state(state, dual=True)
-    # Определяем класс модели по имени архитектуры из config.json
     arch_clean = arch.replace('dual_', '').replace('-', '_')
-    if arch_clean in ('resnet50',):
-        model = create_dual_resnet50(n, dropout_p=0.5)
-    elif arch_clean in ('efficientnet_b3', 'efficientnet_b4', 'convnext_tiny', 'swin_t'):
-        from src.models.backbones import create_dual
-        model = create_dual(arch_clean, n, dropout_p=0.5)
-    else:
-        model = create_dual_resnet18(n, dropout_p=0.5)
-    model.load_state_dict(state, strict=True)
-    return model.to(DEVICE).eval()
+    return load_checkpoint(pth, mode='dual', arch=arch_clean, dropout_p=0.5, device=DEVICE)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -171,7 +126,7 @@ def _predict_single(img: np.ndarray, model: torch.nn.Module, tfm, depth_from: fl
 
 @torch.no_grad()
 def _predict_dual(img_ds: np.ndarray, img_uv: np.ndarray,
-                  model: DualStreamResNet18, tfm_ds, tfm_uv,
+                  model: torch.nn.Module, tfm_ds, tfm_uv,
                   depth_from: float, depth_to: float):
     h_px    = img_ds.shape[0]
     span_cm = (depth_to - depth_from) * 100
@@ -199,14 +154,16 @@ def _text_color(hex_color: str) -> str:
 
 
 def _draw_strip(ax, segments, z_top, z_bot, title='', show_conf=False):
-    ax.set_xlim(0, 1); ax.set_ylim(z_bot, z_top)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(z_bot, z_top)
     for y0, y1, color, conf in segments:
         ax.fill_betweenx([y0, y1], 0.05, 0.95, color=color, linewidth=0)
         if show_conf and conf is not None and conf > 0.50 and (y1 - y0) > 0.02:
             tc = _text_color(color) if isinstance(color, str) and color.startswith('#') else 'white'
             ax.text(0.5, (y0 + y1) / 2, f'{conf:.0%}',
                     ha='center', va='center', fontsize=7, color=tc, fontweight='bold')
-    ax.set_xticks([]); ax.set_title(title, fontsize=10, pad=4)
+    ax.set_xticks([])
+    ax.set_title(title, fontsize=10, pad=4)
     for sp in ax.spines.values():
         sp.set_visible(False)
 
@@ -284,7 +241,8 @@ def visualize_photo(well_name: str, models_dict: dict, tfms_dict: dict,
         ax_uv = fig.add_subplot(gs[0, 1])
         ax_uv.imshow(img_uv, aspect='auto', extent=extent)
         ax_uv.set_title('Фото УФ', fontsize=11, pad=4)
-        ax_uv.set_xticks([]); ax_uv.set_yticks([])
+        ax_uv.set_xticks([])
+        ax_uv.set_yticks([])
 
         # ── Полосы модели ─────────────────────────────────────────────────────
         model_cls_shown: Dict[str, str] = {}   # имя класса → цвет
@@ -484,7 +442,9 @@ def plot_stats(results: dict, stats_dir: Path) -> None:
         ax.axhline(macro, color='#64748B', linestyle='--', linewidth=1.5,
                    label=f'macro F1 = {macro:.3f}')
         ax.set_title(f'F1 по классам — {mod_name}', fontsize=11)
-        ax.set_ylim(0, 1.12); ax.tick_params(axis='x', rotation=35); ax.legend()
+        ax.set_ylim(0, 1.12)
+        ax.tick_params(axis='x', rotation=35)
+        ax.legend()
         for s in ['top', 'right']:
             ax.spines[s].set_visible(False)
     plt.suptitle('F1 по классам', fontsize=13, fontweight='bold')
@@ -506,7 +466,9 @@ def plot_stats(results: dict, stats_dir: Path) -> None:
                 label=f'Ошибка ({(~correct).sum():,})', density=True)
         ax.axvline(max_p.mean(), color='#64748B', linestyle='--',
                    label=f'Среднее={max_p.mean():.2f}')
-        ax.set_title(f'Уверенность — {mod_name}'); ax.set_xlim(0, 1); ax.legend()
+        ax.set_title(f'Уверенность — {mod_name}')
+        ax.set_xlim(0, 1)
+        ax.legend()
     plt.tight_layout()
     fig.savefig(stats_dir / 'confidence_distribution.png', dpi=150, bbox_inches='tight')
     plt.close()
@@ -530,21 +492,25 @@ def plot_stats(results: dict, stats_dir: Path) -> None:
         rows.append(['─' * 12,  '─'*5, '─'*5, '─'*5, '─'*6])
         rows.append(['macro avg',    '',          '',          f'{macro_f1:.3f}',  ''])
         rows.append(['weighted avg', '',          '',          f'{weight_f1:.3f}', ''])
-        rows.append([f'Accuracy',    '',          '',          f'{acc:.3f}',       f'{len(res["labels"]):,}'])
+        rows.append(['Accuracy',    '',          '',          f'{acc:.3f}',       f'{len(res["labels"]):,}'])
 
         ax.axis('off')
         tbl = ax.table(cellText=rows,
                        colLabels=['Класс', 'Precision', 'Recall', 'F1', 'Support'],
                        cellLoc='center', loc='center')
-        tbl.auto_set_font_size(False); tbl.set_fontsize(9); tbl.scale(1.0, 1.6)
+        tbl.auto_set_font_size(False)
+        tbl.set_fontsize(9)
+        tbl.scale(1.0, 1.6)
         n_cls = len(class_names)
         for (r, c), cell in tbl.get_celld().items():
             if r == 0:
-                cell.set_facecolor('#1E3A5F'); cell.set_text_props(color='white', fontweight='bold')
+                cell.set_facecolor('#1E3A5F')
+                cell.set_text_props(color='white', fontweight='bold')
             elif r == n_cls + 1:  # разделитель
                 cell.set_facecolor('#F1F5F9')
             elif r > n_cls + 1:   # итоговые строки
-                cell.set_facecolor('#E2E8F0'); cell.set_text_props(fontweight='bold')
+                cell.set_facecolor('#E2E8F0')
+                cell.set_text_props(fontweight='bold')
             elif r % 2 == 0:
                 cell.set_facecolor('#F8FAFC')
             cell.set_edgecolor('#CBD5E1')
@@ -673,8 +639,10 @@ def main():
         if _stats.exists():
             with open(_stats) as _f:
                 _s = _json.load(_f)
-            _cfg.DS_MEAN = _s['ДС']['mean'];  _cfg.DS_STD = _s['ДС']['std']
-            _cfg.UV_MEAN = _s['УФ']['mean'];  _cfg.UV_STD = _s['УФ']['std']
+            _cfg.DS_MEAN = _s['ДС']['mean']
+            _cfg.DS_STD = _s['ДС']['std']
+            _cfg.UV_MEAN = _s['УФ']['mean']
+            _cfg.UV_STD = _s['УФ']['std']
         print(f'Dataset: {_cfg.DATASET_ROOT}')
 
     run_dir   = _cfg.RESULTS_ROOT / args.run_name
@@ -682,7 +650,7 @@ def main():
     stats_dir = vis_dir / 'stats'
     vis_dir.mkdir(parents=True, exist_ok=True)
 
-    arch = _read_arch(run_dir)
+    arch = read_arch_from_config(run_dir)
 
     print(f'Run    : {run_dir}')
     print(f'Arch   : {arch}')
@@ -724,12 +692,12 @@ def main():
     # IDX2NAME из первого доступного checkpoint
     if args.dual:
         state = torch.load(run_dir / 'dual_best.pth', map_location='cpu', weights_only=True)
-        n_cls = _num_classes_from_state(state, dual=True)
-    else:  # noqa: E501
+        n_cls = infer_num_classes(state, dual=True)
+    else:
         first_mod = next(iter(models_dict))
         pth = run_dir / f'{first_mod}_best.pth'
         state = torch.load(pth, map_location='cpu', weights_only=True)
-        n_cls = _num_classes_from_state(state, dual=False)
+        n_cls = infer_num_classes(state, dual=False)
 
     # Определяем классы: из label_encoder.json (или fallback на CLASSES_ORDER[:n_cls])
     le_path = _cfg.LABEL_ENCODER
@@ -780,8 +748,10 @@ def main():
         if args.dual:
             if args.tta > 1 or args.per_well_norm:
                 suffix = []
-                if args.tta > 1: suffix.append(f'TTA×{args.tta}')
-                if args.per_well_norm: suffix.append('per-well-norm')
+                if args.tta > 1:
+                    suffix.append(f'TTA×{args.tta}')
+                if args.per_well_norm:
+                    suffix.append('per-well-norm')
                 print(f'  [{", ".join(suffix)}]')
             labels, preds, probs, classes = collect_predictions_dual(
                 dual_model, args.split,

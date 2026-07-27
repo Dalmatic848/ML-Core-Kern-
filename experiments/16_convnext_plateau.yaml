@@ -1,0 +1,23 @@
+# ConvNeXt-Tiny (56.8M) — современная свёрточная архитектура 2022 года.
+name: 16_convnext_plateau
+train_args:
+  - run_16_convnext_plateau
+  - --mode
+  - dual
+  - --arch
+  - convnext_tiny
+  - --dataset-root
+  - data/dataset_random
+  - --scheduler
+  - plateau
+  - --max-epochs
+  - "40"
+  - --patience
+  - "10"
+visualize_script: visualize_results.py
+visualize_args:
+  - run_16_convnext_plateau
+  - --dual
+  - --dataset-root
+  - data/dataset_random
+  - --no-photos

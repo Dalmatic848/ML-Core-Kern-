@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 train.py *)",
+      "Bash(python3 predict.py *)",
+      "Bash(python3 prepare_dataset.py *)",
+      "Bash(python3 visualize_results.py *)",
+      "Bash(python3 visualize_soft.py *)",
+      "Bash(python3 scripts/run_experiment.py *)",
+      "Bash(python3 scripts/run_batch.py *)",
+      "Bash(python3 scripts/validate_taxonomy.py)",
+      "Bash(python3 -m pytest*)",
+      "Bash(pytest*)",
+      "Bash(ruff check*)",
+      "Bash(ruff format*)",
+      "Bash(pre-commit run*)",
+      "Bash(git status)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git show*)"
+    ]
+  }
+}

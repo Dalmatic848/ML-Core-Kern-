@@ -45,3 +45,7 @@ env/
 # Experiment outputs — reproducible from experiments/*.yaml, not versioned
 /results/
 /logs/
+
+# Claude Code: settings.json is checked in (project conventions), local
+# per-machine overrides/permission cache are not.
+/.claude/settings.local.json

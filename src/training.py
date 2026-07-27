@@ -248,9 +248,15 @@ def train_task(name: str, model, train_loader, val_loader,
         batch_sched = None
     else:
         epoch_sched = None
+        # pct_start должен быть в (0, 1) — warmup_epochs (по умолчанию 15, см.
+        # config.WARMUP_EPOCHS) не масштабируется автоматически при
+        # --max-epochs < warmup_epochs (например, smoke-тест на 1 эпоху).
+        # Раньше это падало с ValueError из OneCycleLR прямо в середине
+        # прогона; теперь warmup доля просто ограничена разумным диапазоном.
+        pct_start = max(0.05, min(0.9, warmup_epochs / max_epochs))
         batch_sched = optim.lr_scheduler.OneCycleLR(
             optimizer, max_lr=lr, epochs=max_epochs, steps_per_epoch=len(train_loader),
-            pct_start=warmup_epochs / max_epochs, div_factor=10.0, final_div_factor=1e4,
+            pct_start=pct_start, div_factor=10.0, final_div_factor=1e4,
         )
     es = EarlyStopping(patience=patience, min_delta=min_delta)
     step_fn = make_step_fn(model, mode, device, use_mix, soft=soft)

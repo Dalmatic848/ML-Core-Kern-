@@ -18,7 +18,7 @@ ARCH="${2:-resnet18}"
 MODE="${3:-single}"
 WARM_START="${4:-}"
 
-PYTHON="$(dirname "$0")/venv/bin/python3"
+PYTHON="$(dirname "$0")/../venv/bin/python3"
 SCRIPT_DIR="$(dirname "$0")"
 
 # ── Родительский шелл игнорирует Ctrl+C ──────────────────────────────────────

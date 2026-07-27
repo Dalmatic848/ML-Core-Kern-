@@ -21,7 +21,7 @@ NORM_STATS_FILE = DATASET_ROOT / "normalization_stats.json"
 
 # ── Пути к результатам ────────────────────────────────────────────────────────
 RESULTS_ROOT    = ROOT / "results"
-OLD_RESULTS     = ROOT / "old_results"
+MODELS_ROOT     = ROOT / "models"
 DATASET_STATS   = RESULTS_ROOT / "dataset_stats"
 
 # ── Параметры тайлинга ────────────────────────────────────────────────────────

@@ -179,7 +179,8 @@ def _plot_curves(name: str, hist: list, arch_label: str, save_path: Path):
     fig, axes = plt.subplots(1, 3, figsize=(15, 4))
     axes[0].plot(epochs, [h['train_loss'] for h in hist], label='Train')
     axes[0].plot(epochs, [h['val_loss']   for h in hist], label='Val')
-    axes[0].set_title(f'{name} — Loss'); axes[0].legend()
+    axes[0].set_title(f'{name} — Loss')
+    axes[0].legend()
     best = max(hist, key=lambda h: h['val_f1'])
     axes[1].plot(epochs, [h['val_f1'] for h in hist], color='tab:green')
     axes[1].axvline(best['epoch'], color='gray', linestyle='--', alpha=0.6)
@@ -187,7 +188,8 @@ def _plot_curves(name: str, hist: list, arch_label: str, save_path: Path):
     axes[2].plot(epochs, [h['val_acc']  for h in hist], label='Acc')
     axes[2].plot(epochs, [h['val_prec'] for h in hist], label='Prec')
     axes[2].plot(epochs, [h['val_rec']  for h in hist], label='Rec')
-    axes[2].set_title(f'{name} — Val metrics'); axes[2].legend()
+    axes[2].set_title(f'{name} — Val metrics')
+    axes[2].legend()
     for ax in axes:
         ax.set_xlabel('Epoch')
     plt.suptitle(f'Кривые обучения — {name} ({arch_label})', fontsize=12)
@@ -221,7 +223,9 @@ def _plot_per_class_f1(labels, preds, classes: list, title: str, save_path: Path
                 f'{v:.2f}', ha='center', va='bottom', fontsize=9)
     ax.axhline(f1_per.mean(), color='gray', linestyle='--', linewidth=1,
                label=f'macro = {f1_per.mean():.2f}')
-    ax.set_ylim(0, 1.05); ax.tick_params(axis='x', rotation=35); ax.legend()
+    ax.set_ylim(0, 1.05)
+    ax.tick_params(axis='x', rotation=35)
+    ax.legend()
     ax.set_title(title)
     for sp in ['top', 'right']:
         ax.spines[sp].set_visible(False)
@@ -247,10 +251,13 @@ def _plot_summary(results: dict, run_name: str, arch_label: str,
         colLabels=['Модель', 'F1 macro', 'Accuracy', 'Precision', 'Recall', 'Лучшая эпоха'],
         cellLoc='center', loc='center',
     )
-    tbl.auto_set_font_size(False); tbl.set_fontsize(11); tbl.scale(1.0, 2.0)
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(11)
+    tbl.scale(1.0, 2.0)
     for (r, c), cell in tbl.get_celld().items():
         if r == 0:
-            cell.set_facecolor('#1E3A5F'); cell.set_text_props(color='white', fontweight='bold')
+            cell.set_facecolor('#1E3A5F')
+            cell.set_text_props(color='white', fontweight='bold')
         elif r % 2:
             cell.set_facecolor('#EFF6FF')
         else:

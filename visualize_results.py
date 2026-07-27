@@ -154,14 +154,16 @@ def _text_color(hex_color: str) -> str:
 
 
 def _draw_strip(ax, segments, z_top, z_bot, title='', show_conf=False):
-    ax.set_xlim(0, 1); ax.set_ylim(z_bot, z_top)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(z_bot, z_top)
     for y0, y1, color, conf in segments:
         ax.fill_betweenx([y0, y1], 0.05, 0.95, color=color, linewidth=0)
         if show_conf and conf is not None and conf > 0.50 and (y1 - y0) > 0.02:
             tc = _text_color(color) if isinstance(color, str) and color.startswith('#') else 'white'
             ax.text(0.5, (y0 + y1) / 2, f'{conf:.0%}',
                     ha='center', va='center', fontsize=7, color=tc, fontweight='bold')
-    ax.set_xticks([]); ax.set_title(title, fontsize=10, pad=4)
+    ax.set_xticks([])
+    ax.set_title(title, fontsize=10, pad=4)
     for sp in ax.spines.values():
         sp.set_visible(False)
 
@@ -239,7 +241,8 @@ def visualize_photo(well_name: str, models_dict: dict, tfms_dict: dict,
         ax_uv = fig.add_subplot(gs[0, 1])
         ax_uv.imshow(img_uv, aspect='auto', extent=extent)
         ax_uv.set_title('Фото УФ', fontsize=11, pad=4)
-        ax_uv.set_xticks([]); ax_uv.set_yticks([])
+        ax_uv.set_xticks([])
+        ax_uv.set_yticks([])
 
         # ── Полосы модели ─────────────────────────────────────────────────────
         model_cls_shown: Dict[str, str] = {}   # имя класса → цвет
@@ -439,7 +442,9 @@ def plot_stats(results: dict, stats_dir: Path) -> None:
         ax.axhline(macro, color='#64748B', linestyle='--', linewidth=1.5,
                    label=f'macro F1 = {macro:.3f}')
         ax.set_title(f'F1 по классам — {mod_name}', fontsize=11)
-        ax.set_ylim(0, 1.12); ax.tick_params(axis='x', rotation=35); ax.legend()
+        ax.set_ylim(0, 1.12)
+        ax.tick_params(axis='x', rotation=35)
+        ax.legend()
         for s in ['top', 'right']:
             ax.spines[s].set_visible(False)
     plt.suptitle('F1 по классам', fontsize=13, fontweight='bold')
@@ -461,7 +466,9 @@ def plot_stats(results: dict, stats_dir: Path) -> None:
                 label=f'Ошибка ({(~correct).sum():,})', density=True)
         ax.axvline(max_p.mean(), color='#64748B', linestyle='--',
                    label=f'Среднее={max_p.mean():.2f}')
-        ax.set_title(f'Уверенность — {mod_name}'); ax.set_xlim(0, 1); ax.legend()
+        ax.set_title(f'Уверенность — {mod_name}')
+        ax.set_xlim(0, 1)
+        ax.legend()
     plt.tight_layout()
     fig.savefig(stats_dir / 'confidence_distribution.png', dpi=150, bbox_inches='tight')
     plt.close()
@@ -491,15 +498,19 @@ def plot_stats(results: dict, stats_dir: Path) -> None:
         tbl = ax.table(cellText=rows,
                        colLabels=['Класс', 'Precision', 'Recall', 'F1', 'Support'],
                        cellLoc='center', loc='center')
-        tbl.auto_set_font_size(False); tbl.set_fontsize(9); tbl.scale(1.0, 1.6)
+        tbl.auto_set_font_size(False)
+        tbl.set_fontsize(9)
+        tbl.scale(1.0, 1.6)
         n_cls = len(class_names)
         for (r, c), cell in tbl.get_celld().items():
             if r == 0:
-                cell.set_facecolor('#1E3A5F'); cell.set_text_props(color='white', fontweight='bold')
+                cell.set_facecolor('#1E3A5F')
+                cell.set_text_props(color='white', fontweight='bold')
             elif r == n_cls + 1:  # разделитель
                 cell.set_facecolor('#F1F5F9')
             elif r > n_cls + 1:   # итоговые строки
-                cell.set_facecolor('#E2E8F0'); cell.set_text_props(fontweight='bold')
+                cell.set_facecolor('#E2E8F0')
+                cell.set_text_props(fontweight='bold')
             elif r % 2 == 0:
                 cell.set_facecolor('#F8FAFC')
             cell.set_edgecolor('#CBD5E1')
@@ -628,8 +639,10 @@ def main():
         if _stats.exists():
             with open(_stats) as _f:
                 _s = _json.load(_f)
-            _cfg.DS_MEAN = _s['ДС']['mean'];  _cfg.DS_STD = _s['ДС']['std']
-            _cfg.UV_MEAN = _s['УФ']['mean'];  _cfg.UV_STD = _s['УФ']['std']
+            _cfg.DS_MEAN = _s['ДС']['mean']
+            _cfg.DS_STD = _s['ДС']['std']
+            _cfg.UV_MEAN = _s['УФ']['mean']
+            _cfg.UV_STD = _s['УФ']['std']
         print(f'Dataset: {_cfg.DATASET_ROOT}')
 
     run_dir   = _cfg.RESULTS_ROOT / args.run_name
@@ -735,8 +748,10 @@ def main():
         if args.dual:
             if args.tta > 1 or args.per_well_norm:
                 suffix = []
-                if args.tta > 1: suffix.append(f'TTA×{args.tta}')
-                if args.per_well_norm: suffix.append('per-well-norm')
+                if args.tta > 1:
+                    suffix.append(f'TTA×{args.tta}')
+                if args.per_well_norm:
+                    suffix.append('per-well-norm')
                 print(f'  [{", ".join(suffix)}]')
             labels, preds, probs, classes = collect_predictions_dual(
                 dual_model, args.split,

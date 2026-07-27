@@ -17,6 +17,7 @@
 """
 
 import argparse
+import colorsys as _cs
 import json
 import re
 import sys
@@ -81,10 +82,8 @@ SIX_CLASS_COLORS = {
 
 # 6-классовый маппинг и нормализация CSV-имён — единый источник: src/taxonomy.py
 
+
 # Уникальные цвета для оригинальных минералов в CSV (автоматически)
-import colorsys as _cs
-
-
 def _mineral_color(mineral_key: str) -> str:
     """Детерминированный цвет по хешу имени минерала."""
     h = abs(hash(mineral_key)) % 360 / 360.0
@@ -146,7 +145,8 @@ def plot_confusion(true_hard, pred_hard, base_classes, out_path: Path):
     disp = ConfusionMatrixDisplay(cm, display_labels=short)
     disp.plot(ax=ax, colorbar=True, xticks_rotation=30, values_format='.0%')
     ax.set_title('Матрица ошибок — базовые компоненты\n(нормировано по строкам)', fontsize=12)
-    ax.set_xlabel('Предсказано'); ax.set_ylabel('Истинный класс')
+    ax.set_xlabel('Предсказано')
+    ax.set_ylabel('Истинный класс')
     plt.tight_layout()
     fig.savefig(out_path, dpi=150, bbox_inches='tight')
     plt.close()
@@ -172,8 +172,10 @@ def plot_f1_bars(true_hard, pred_hard, base_classes, out_path: Path):
     ax.axhline(macro, color='#64748B', linestyle='--', linewidth=1.5,
                label=f'macro F1 = {macro:.3f}')
     ax.set_title('F1 по базовым компонентам — тест', fontsize=13, fontweight='bold')
-    ax.set_ylim(0, 1.15); ax.legend(fontsize=10)
-    for s in ['top', 'right']: ax.spines[s].set_visible(False)
+    ax.set_ylim(0, 1.15)
+    ax.legend(fontsize=10)
+    for s in ['top', 'right']:
+        ax.spines[s].set_visible(False)
     plt.tight_layout()
     fig.savefig(out_path, dpi=150, bbox_inches='tight')
     plt.close()
@@ -218,7 +220,8 @@ def plot_avg_composition(probs_arr, true_hard, base_classes, out_path: Path):
                  fontsize=11, fontweight='bold')
     ax.set_ylim(0, 1.05)
     ax.legend(loc='upper right', fontsize=9, ncol=2)
-    for s in ['top', 'right']: ax.spines[s].set_visible(False)
+    for s in ['top', 'right']:
+        ax.spines[s].set_visible(False)
     plt.tight_layout()
     fig.savefig(out_path, dpi=150, bbox_inches='tight')
     plt.close()
@@ -236,8 +239,11 @@ def plot_confidence(probs_arr, true_hard, pred_hard, out_path: Path):
     ax.axvline(max_p.mean(), color='#64748B', linestyle='--',
                label=f'Среднее = {max_p.mean():.2f}')
     ax.set_title('Уверенность модели (max softmax probability)', fontsize=12)
-    ax.set_xlabel('Уверенность'); ax.set_xlim(0, 1); ax.legend()
-    for s in ['top', 'right']: ax.spines[s].set_visible(False)
+    ax.set_xlabel('Уверенность')
+    ax.set_xlim(0, 1)
+    ax.legend()
+    for s in ['top', 'right']:
+        ax.spines[s].set_visible(False)
     plt.tight_layout()
     fig.savefig(out_path, dpi=150, bbox_inches='tight')
     plt.close()
@@ -268,7 +274,8 @@ def plot_entropy_by_class(probs_arr, true_hard, base_classes, out_path: Path):
     ax.axhline(0.5, color='gray', linestyle='--', linewidth=0.8, alpha=0.5,
                label='H=0.5 (умеренная)')
     ax.legend(fontsize=8)
-    for s in ['top', 'right']: ax.spines[s].set_visible(False)
+    for s in ['top', 'right']:
+        ax.spines[s].set_visible(False)
 
     # Гистограмма энтропии: правильные vs ошибочные
     ax = axes[1]
@@ -279,11 +286,14 @@ def plot_entropy_by_class(probs_arr, true_hard, base_classes, out_path: Path):
             density=True, label=f'Ошибка ({(~correct).sum():,})')
     ax.axvline(entropies.mean(), color='#64748B', linestyle='--',
                label=f'Среднее H={entropies.mean():.2f}')
-    ax.set_xlabel('Энтропия H'); ax.set_ylabel('Плотность')
+    ax.set_xlabel('Энтропия H')
+    ax.set_ylabel('Плотность')
     ax.set_title('Энтропия: верные vs ошибочные предсказания\n'
                  '(ошибки концентрируются при высокой H)', fontsize=10, fontweight='bold')
-    ax.set_xlim(0, 1); ax.legend(fontsize=9)
-    for s in ['top', 'right']: ax.spines[s].set_visible(False)
+    ax.set_xlim(0, 1)
+    ax.legend(fontsize=9)
+    for s in ['top', 'right']:
+        ax.spines[s].set_visible(False)
 
     plt.suptitle('Неуверенность (энтропия) предсказаний — Soft Labels',
                  fontsize=12, fontweight='bold')
@@ -315,7 +325,8 @@ def plot_kl_divergence(probs_arr, true_soft_arr, true_hard, base_classes, out_pa
     ax.set_ylabel('KL(истина || предсказание), bits')
     ax.set_title('KL-дивергенция по классу\n'
                  '(0 = идеал, чем меньше — тем точнее состав)', fontsize=10, fontweight='bold')
-    for s in ['top', 'right']: ax.spines[s].set_visible(False)
+    for s in ['top', 'right']:
+        ax.spines[s].set_visible(False)
 
     # Scatter: KL vs уверенность (max prob)
     ax = axes[1]
@@ -332,7 +343,8 @@ def plot_kl_divergence(probs_arr, true_soft_arr, true_hard, base_classes, out_pa
     ax.text(0.95, 0.95, f'Median KL={np.median(kl_vals):.2f}\nMean KL={kl_vals.mean():.2f}',
             transform=ax.transAxes, ha='right', va='top', fontsize=9,
             bbox=dict(boxstyle='round', facecolor='#F1F5F9', alpha=0.8))
-    for s in ['top', 'right']: ax.spines[s].set_visible(False)
+    for s in ['top', 'right']:
+        ax.spines[s].set_visible(False)
 
     plt.suptitle('KL-дивергенция: насколько точно модель угадывает состав',
                  fontsize=12, fontweight='bold')
@@ -366,7 +378,8 @@ def plot_report_table(true_hard, pred_hard, base_classes, out_path: Path):
     tbl.scale(1, 1.6)
     for (r, c), cell in tbl.get_celld().items():
         if r == 0:
-            cell.set_facecolor('#1E293B'); cell.set_text_props(color='white', fontweight='bold')
+            cell.set_facecolor('#1E293B')
+            cell.set_text_props(color='white', fontweight='bold')
         elif r > len(base_classes):
             cell.set_facecolor('#F1F5F9')
         elif r % 2 == 0:
@@ -414,7 +427,8 @@ def _load_csv_markup(well_name: str) -> list:
 def _draw_markup_strip(ax, markup: list, z_top: float, z_bot: float,
                         colormap: dict, title: str, show_text: bool = True):
     """Рисует полосу разметки с цветными блоками и текстом."""
-    ax.set_xlim(0, 1); ax.set_ylim(z_bot, z_top)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(z_bot, z_top)
     ax.set_title(title, fontsize=8, pad=3)
     ax.set_xticks([])
 
@@ -438,7 +452,8 @@ def _draw_soft_strip(ax, segments: list, z_top: float, z_bot: float,
                      base_classes: list, soft_labels_map: dict = None,
                      title: str = '', show_entropy: bool = False):
     """Рисует стековые бары для soft-векторов. Если soft_labels_map — истинные метки."""
-    ax.set_xlim(0, 1); ax.set_ylim(z_bot, z_top)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(z_bot, z_top)
     ax.set_title(title, fontsize=8, pad=3)
     ax.set_xticks([0, 0.5, 1])
     ax.set_xticklabels(['0', '.5', '1'], fontsize=6)
@@ -492,7 +507,8 @@ def _soft_predict_column(img_ds: np.ndarray, img_uv: np.ndarray,
 
 def _parse_depth(fname: str):
     m = _DEPTH_RE.search(fname)
-    if not m: return None
+    if not m:
+        return None
     return float(m.group(1).replace(',', '.')), float(m.group(2).replace(',', '.'))
 
 
@@ -519,7 +535,8 @@ def visualize_core_column(well_name: str, model, tfm_ds, tfm_uv,
     photos = []
     for ds_path in sorted(ds_dir.glob('*.jpeg')):
         d = _parse_depth(ds_path.stem)
-        if d is None: continue
+        if d is None:
+            continue
         d_from, d_to = d
         if target_depth is not None and abs(d_from - target_depth) > 0.05:
             continue
@@ -577,7 +594,8 @@ def visualize_core_column(well_name: str, model, tfm_ds, tfm_uv,
                                    ['ДС (дневной)', 'УФ']):
             ax.imshow(img, aspect='auto', extent=[0, 1, z_bot, z_top])
             ax.set_title(title, fontsize=8, pad=3)
-            ax.set_xlim(0, 1); ax.set_ylim(z_bot, z_top)
+            ax.set_xlim(0, 1)
+            ax.set_ylim(z_bot, z_top)
             ax.set_xticks([])
             ax.set_ylabel('Глубина (м)', fontsize=7)
             ax.yaxis.set_tick_params(labelsize=7)
@@ -685,8 +703,10 @@ def main():
     with open(dataset_root / 'base_classes.json') as f:
         base_classes = json.load(f)
 
-    ds_mean = stats['ДС']['mean']; ds_std = stats['ДС']['std']
-    uv_mean = stats['УФ']['mean']; uv_std = stats['УФ']['std']
+    ds_mean = stats['ДС']['mean']
+    ds_std = stats['ДС']['std']
+    uv_mean = stats['УФ']['mean']
+    uv_std = stats['УФ']['std']
 
     print(f'Run          : {run_dir}')
     print(f'Dataset      : {dataset_root}')

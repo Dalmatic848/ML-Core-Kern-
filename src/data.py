@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Callable, Optional, Tuple, List
+from typing import Callable, List, Optional, Tuple
 
 import torch
 from torch.utils.data import DataLoader, WeightedRandomSampler

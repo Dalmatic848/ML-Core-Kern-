@@ -3,7 +3,7 @@ from .augmentation import cutmix_data, rand_bbox
 from .data import ClassAwareImageFolder, make_weighted_sampler, prepare_loaders
 from .losses import FocalLoss, LabelSmoothingCE, get_criterion
 from .models.resnet import create_resnet18
-from .training import EarlyStopping, save_history, step_scheduler, train_one_epoch, validate
+from .training import EarlyStopping, save_history, train_task
 from .transforms import PadToSquare, get_transforms
 from .utils import set_seed
 
@@ -14,5 +14,5 @@ __all__ = [
     "create_resnet18",
     "FocalLoss", "LabelSmoothingCE", "get_criterion",
     "cutmix_data", "rand_bbox",
-    "EarlyStopping", "train_one_epoch", "validate", "step_scheduler", "save_history",
+    "EarlyStopping", "train_task", "save_history",
 ]
